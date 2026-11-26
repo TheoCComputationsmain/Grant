@@ -30,6 +30,9 @@ _DSN = (
 ).strip()
 _DB_LOCK = Lock()
 _APP_ENV = os.environ.get("GRANT_APP_ENV", "development").strip().lower()
+# Vercel sets VERCEL=1 automatically; never depend on a manually configured
+# GRANT_APP_ENV to keep the ephemeral SQLite fallback out of production.
+_IS_VERCEL = os.environ.get("VERCEL", "").strip() == "1"
 _ALLOW_SQLITE_IN_PROD = os.environ.get(
     "GRANT_ALLOW_SQLITE_IN_PROD", ""
 ).strip().lower() in {"1", "true", "yes"}
@@ -41,7 +44,8 @@ def postgres_enabled() -> bool:
 
 def require_production_store() -> None:
     """Fail fast instead of silently serving ephemeral SQLite in production."""
-    if _APP_ENV == "production" and not _DSN and not _ALLOW_SQLITE_IN_PROD:
+    production = _APP_ENV == "production" or _IS_VERCEL
+    if production and not _DSN and not _ALLOW_SQLITE_IN_PROD:
         raise RuntimeError(
             "DATABASE_URL is required in production. Set a Neon Postgres DSN "
             "or explicitly set GRANT_ALLOW_SQLITE_IN_PROD=true."

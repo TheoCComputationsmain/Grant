@@ -42,6 +42,7 @@ from grant import (
 )
 
 APP_ENV = os.environ.get("GRANT_APP_ENV", "development").strip().lower()
+IS_PRODUCTION = APP_ENV == "production" or os.environ.get("VERCEL", "").strip() == "1"
 DB_PATH = Path(os.environ.get("GRANT_DB", Path(__file__).resolve().parent / "grant.db"))
 PUBLIC_BASE_URL = os.environ.get("GRANT_PUBLIC_BASE_URL", "").rstrip("/")
 RATE_LIMIT_PER_MIN = int(os.environ.get("GRANT_RATE_LIMIT_PER_MIN", "60"))
@@ -3761,7 +3762,7 @@ async def cashfree_test_webhook(http_request: Request, token: str = "") -> JSONR
     ``/v1/billing/webhook`` so a live checkout can be verified end to end with
     ``scripts/verify_cashfree.py``.
     """
-    if APP_ENV == "production" and not ALLOW_TEST_WEBHOOK:
+    if IS_PRODUCTION and not ALLOW_TEST_WEBHOOK:
         raise HTTPException(
             status_code=403,
             detail="Test webhook is disabled in production. Set GRANT_ALLOW_TEST_WEBHOOK=true to enable.",

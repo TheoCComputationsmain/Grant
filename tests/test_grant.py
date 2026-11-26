@@ -1785,3 +1785,37 @@ def test_cashfree_test_webhook_activates_tier_and_is_idempotent(api, monkeypatch
         ).fetchone()
     assert stored["plan_tier"] == "plus"
 
+
+def test_vercel_environment_is_treated_as_production(monkeypatch):
+    from grant import db as dbmod
+
+    monkeypatch.setattr(dbmod, "_APP_ENV", "development")
+    monkeypatch.setattr(dbmod, "_IS_VERCEL", True)
+    monkeypatch.setattr(dbmod, "_DSN", "")
+    monkeypatch.setattr(dbmod, "_ALLOW_SQLITE_IN_PROD", False)
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required in production"):
+        dbmod.require_production_store()
+
+
+def test_production_console_fallback_never_leaks_magic_links():
+    from grant import emailer
+
+    with pytest.raises(emailer.EmailError, match="No email provider configured"):
+        emailer.send_magic_link(
+            "nobody@example.test",
+            "https://grant.test/auth/verify?token=secret",
+            env={"VERCEL": "1"},
+        )
+
+
+def test_test_webhook_is_disabled_in_production(api, monkeypatch):
+    monkeypatch.setattr(main, "IS_PRODUCTION", True)
+    monkeypatch.setattr(main, "ALLOW_TEST_WEBHOOK", False)
+    response = api.post(
+        "/api/webhooks/cashfree/test",
+        params={"token": os.environ["GRANT_OPS_TOKEN"]},
+        json={"org_id": "ws_cf_test", "plan": "plus"},
+    )
+    assert response.status_code == 403
+    assert "GRANT_ALLOW_TEST_WEBHOOK" in response.json()["detail"]
+

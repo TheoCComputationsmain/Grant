@@ -280,6 +280,6 @@ uvicorn main:app --reload
 python -m pytest tests -q
 ```
 
-Current status: **98 passed**.
+Current status: **101 passed**.
 
 Before public launch, set `GRANT_PUBLIC_BASE_URL` and `GRANT_SIGNING_SECRET`, and provision a Neon DSN (`DATABASE_URL` / `NEON_DATABASE_URL` / `GRANT_NEON_DATABASE_URL`) for durable storage — the schema in `migrations/001_neon_schema.sql` then applies automatically on boot. None of these deployments or schema applications happen without explicit authorization. See `docs/DEPLOYMENT.md`.

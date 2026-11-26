@@ -16,7 +16,7 @@ Set these in Vercel Production:
 | `GRANT_RATE_LIMIT_PER_MIN` | No | Requests per IP per minute, default `60` |
 | `GRANT_GATEWAY_WAIT_SECONDS` | No | Seconds gateway waits for approval, default `20`, max `45` |
 | `GRANT_ALLOW_HTTP_UPSTREAMS` | No | Set `true` only if production must allow `http://` upstreams |
-| `GRANT_APP_ENV` | Yes | `development` or `production`; production requires `DATABASE_URL` |
+| `GRANT_APP_ENV` | Recommended | `development` or `production`. Vercel sets `VERCEL=1`, which is always treated as production; production requires `DATABASE_URL` and a configured email provider |
 | `GRANT_ALLOW_SQLITE_IN_PROD` | No | Escape hatch only; set `true` to explicitly allow ephemeral SQLite in production |
 | `GRANT_EMAIL_PROVIDER` | No | `resend`, `smtp`, or `console`. Auto-detected from the credentials below |
 | `RESEND_API_KEY` | For magic links | Resend API key for one-time sign-in email |

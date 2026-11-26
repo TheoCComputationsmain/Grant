@@ -109,7 +109,10 @@ def _send_smtp(env: Mapping[str, str], to: str, url: str) -> None:
 def send_magic_link(to: str, url: str, env: Mapping[str, str] | None = None) -> str:
     """Deliver a one-time sign-in link. Returns the provider name."""
     environ = env if env is not None else os.environ
-    production = str(environ.get("GRANT_APP_ENV", "development")).strip().lower() == "production"
+    production = (
+        str(environ.get("GRANT_APP_ENV", "development")).strip().lower() == "production"
+        or str(environ.get("VERCEL", "")).strip() == "1"
+    )
     provider = provider_name(environ, production=production)
     if provider == "resend":
         _send_resend(environ, to, url)
