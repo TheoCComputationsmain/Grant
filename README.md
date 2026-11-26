@@ -74,13 +74,15 @@ The approval URL is a capability link. No account is required to approve.
 | `main.py` | FastAPI service: approval pages, gateway proxy, HTTP API, stats, health checks |
 | `grant/` | Python SDK with no third-party imports, plus local proxy daemon |
 | `grant/cli.py` | `grantctl` gateway, proxy, request, status, and verify commands |
-| `grant/db.py` | SQLite-first adapter; auto-applies Neon/Postgres schema when a DSN is set |
+| `grant/db.py` | Neon Postgres primary adapter with a dev-only SQLite fallback; production refuses ephemeral storage |
 | `grant/telemetry.py` | Privacy-preserving login/pop-up telemetry and live reach metrics |
 | `grant/login_library.py` | Read-only login/reach library: users, logins, pop-ups, computers, sanitized history |
 | `grant/assets/grant-inject.js` | Injectable browser interceptor for fetch/XHR and risky clicks |
 | `grant/policies/oauth_scopes.json` | Zero-custody OAuth scope → gateway rule templates |
-| `migrations/001_neon_schema.sql` | Exact durable Neon schema (prepared, not applied live) |
-| `tests/` | 84 passing tests covering consent, gateway, popup, magic receipt, A2A, browser inject, billing, telemetry, login library, and policy flows |
+| `migrations/001_neon_schema.sql` | Durable Neon schema, applied automatically when `DATABASE_URL` is set |
+| `grant/emailer.py` | Resend / SMTP / dev-console magic-link delivery with no third-party SDK |
+| `scripts/verify_cashfree.py` | Checkout, simulated webhook, and tier-activation verification CLI |
+| `tests/` | Launch tests covering consent, gateway, popup, magic receipt, A2A, browser inject, identity, API keys, gates, billing, telemetry, login library, and policy flows |
 | `docs/GATEWAY.md` | MCP gateway, local proxy, and OAuth policy templates |
 | `docs/` | Quickstart, framework examples, deployment, brand system |
 | `vercel.json` | Vercel function configuration |
@@ -194,7 +196,7 @@ Every approval card carries the persistent watermark `● Protected by Grant · 
 
 - `Approved. Receipt req_... recorded.` — a signed receipt, never a blank close screen.
 - Path A: `Want to see every AI agent you've authorized—or revoke Always allow anytime?` → `Open Your Free Grant Dashboard →`.
-- Path B: `Building AI agents? Protect your own users' actions in 2 minutes.` → `Get Your Free API Key →` (currently starts at `/start?from=receipt`; Grant does not mint API keys).
+- Path B: `Building AI agents? Protect your own users' actions in 2 minutes.` → `Get Your Free API Key →` (starts at `/start?from=receipt`, then the workspace dashboard mints a real `gr_live_…` key after a one-time email sign-in).
 
 A signed, HttpOnly `grant_dashboard` cookie silently creates or reuses a workspace on approval, so the dashboard link is one click with no password form and no email capture. Billing email stays optional and is only used to match Cashfree payments. The receipt remains visible until the person chooses a path.
 
@@ -224,7 +226,7 @@ A signed, HttpOnly `grant_dashboard` cookie silently creates or reuses a workspa
 - **Embeddable message:** `ask.message` is designed to be pasted into agent output, Slack, or a tool result.
 - **Popup triggers:** OAuth-style window with `postMessage` auto-close, Shadow-DOM widget, injectable browser script, and mobile deep-link card.
 - **Magic Receipt:** the approval card is the landing page; the watermark builds builder trust, and the signed receipt turns a one-time approver into a passwordless workspace owner in one click.
-- **Contextual guardrails:** conditional auto-approve rules, Slack/webhook delivery, team routing, SMS/WhatsApp, and audit retention are offered at the moment of risk.
+- **Contextual guardrails:** conditional auto-approve rules, Slack/webhook delivery, team routing, and audit retention are offered at the moment of risk. SMS/WhatsApp alerts are Pro-tier and coming soon — no provider is connected yet.
 - **Public proof:** aggregate stats show adoption without exposing private data.
 
 No fake engagement, voting, mass outreach, or purchased traffic is part of this system.
@@ -245,12 +247,25 @@ Four tiers at `/pricing`, with a monthly/annual toggle (20% off annual). Annual 
 
 - **Free** ($0) — Basic Approve once / Always allow pop-up, Email & Web links (1,000/mo), 7-day audit trail. Includes a 14-day Pro Guardrails reverse trial.
 - **Plus** ($20/mo or ₹2,400/mo) — For solo builders putting an agent into production with real users or money. Locks: auto-approve rules (spend/scope caps), Slack & Webhook instant approvals (15,000/mo), 30-day audit log retention.
-- **Pro** ($150/mo or ₹12,600/mo) — For teams running agents across departments with compliance needs. Locks: multi-approver routing & role rules, SMS / WhatsApp approval alerts (100,000/mo), 1-year audit trail + CSV/JSON exports.
+- **Pro** ($150/mo or ₹12,600/mo) — For teams running agents across departments with compliance needs. Locks: multi-approver routing & role rules, 1-year audit trail + CSV/JSON exports, and SMS / WhatsApp approval alerts (100,000/mo, **coming soon** — no provider connected).
 - **Enterprise** ($4,000/mo or ₹340,000/mo) — For large organizations and platforms embedding Grant at scale under strict security and legal procurement. Contact CTA with custom terms. Locks: white-label domain & custom branding, SSO / SAML & org directory sync, 99.99% SLA + real-time SIEM log streaming (with custom retention of 7+ years).
 
 Plan positioning, feature bullets, and lock flags live in `grant/plans.py`; `/pricing` renders those exact bullets, and approval drawers surface the relevant Plus/Pro lock at the moment of risk. Live agents still run on soft limits — feature locks are commercial/UI gates, not hard request blockers.
 
-Cashfree-hosted monthly forms only. One signed webhook resolves the tier by permanent form/link ID or paid amount, matches the normalized billing email, sets a 32-day expiry, and resets the monthly quota. A different checkout email is stored as a verified unclaimed receipt and can be claimed from the workspace Billing section. Day-27 renewal reminders point back to the same static form and are sent only through an explicitly configured email webhook. Grant itself never takes payment or handles cards. Soft limits never stop a live agent.
+Cashfree-hosted monthly forms only. One signed webhook resolves the tier by permanent form/link ID or paid amount, matches the normalized billing email, sets a 32-day expiry, and resets the monthly quota. A different checkout email is stored as a verified unclaimed receipt and can be claimed from the workspace Billing section. Day-27 renewal reminders point back to the same static form and are sent only through an explicitly configured email webhook. Grant itself never takes payment or handles cards. Monthly quotas and plan-only features are enforced server-side: an exhausted Free quota returns `402`, and Plus/Pro-only rules return `403`, both with upgrade metadata.
+
+---
+
+## Identity, keys, and launch gates
+
+- **Passwordless identity:** `POST /v1/auth/magic-link` sends a one-time link via Resend or SMTP (dev prints it to console), and `GET /auth/verify` creates or loads a durable `users` row, attaches anonymous `claim_token` rules, records `login_history`, and sets an HttpOnly `grant_session` cookie.
+- **Real API keys:** the workspace dashboard mints `gr_live_…` keys through `POST /api/keys`. Only the SHA-256 digest is stored in Neon; the raw key is displayed once. Send it as `Authorization: Bearer gr_live_…` to protected endpoints. `GET`/`DELETE /api/keys` manage live keys, and invalid or revoked keys return `401`.
+- **Hard gates:** every request-creating handler shares `enforce_request_gates()`. Free quotas return `402`; conditional rules (Plus) and multi-approver routing / mobile channels (Pro) return `403` with `current_tier`, `required_tier`, and `upgrade_url`.
+- **Cashfree verification:** `python scripts/verify_cashfree.py --org ws_live --mode checkout` prints the hosted monthly form. After paying, `--mode verify` polls ops-gated `GET /api/billing/status` until the Neon plan tier activates. `--mode simulate` posts to `POST /api/webhooks/cashfree/test` to exercise the same activation path without moving money.
+
+### Status that is still honest
+
+SMS and WhatsApp approval alerts are Pro-tier features marked **coming soon** because Grant has no SMS provider integration. Annual pricing is display-only; hosted checkout is monthly-only. Enterprise is a contact CTA, not a payment link. The Chrome Web Store extension and custom LangGraph/CrewAI SDKs are deliberately out of scope — the inject script and `/v1/a2a/gate` HTTP endpoint are the supported browser and agent integrations.
 
 ---
 
@@ -265,6 +280,6 @@ uvicorn main:app --reload
 python -m pytest tests -q
 ```
 
-Current status: **84 passed**.
+Current status: **98 passed**.
 
 Before public launch, set `GRANT_PUBLIC_BASE_URL` and `GRANT_SIGNING_SECRET`, and provision a Neon DSN (`DATABASE_URL` / `NEON_DATABASE_URL` / `GRANT_NEON_DATABASE_URL`) for durable storage — the schema in `migrations/001_neon_schema.sql` then applies automatically on boot. None of these deployments or schema applications happen without explicit authorization. See `docs/DEPLOYMENT.md`.

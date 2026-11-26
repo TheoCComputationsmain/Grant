@@ -47,6 +47,14 @@ PUBLIC_BASE_URL = os.environ.get("GRANT_PUBLIC_BASE_URL", "").rstrip("/")
 RATE_LIMIT_PER_MIN = int(os.environ.get("GRANT_RATE_LIMIT_PER_MIN", "60"))
 GATEWAY_WAIT_SECONDS = max(0, min(45, int(os.environ.get("GRANT_GATEWAY_WAIT_SECONDS", "20"))))
 ALLOW_HTTP_UPSTREAMS = os.environ.get("GRANT_ALLOW_HTTP_UPSTREAMS", "").strip().lower() in {"1", "true", "yes"}
+SMS_PROVIDER_CONFIGURED = bool(
+    os.environ.get("GRANT_SMS_PROVIDER", "").strip()
+    or os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    or os.environ.get("GRANT_WHATSAPP_PROVIDER", "").strip()
+)
+ALLOW_TEST_WEBHOOK = os.environ.get("GRANT_ALLOW_TEST_WEBHOOK", "").strip().lower() in {
+    "1", "true", "yes"
+}
 BLOB_PREFIX = os.environ.get("GRANT_BLOB_PREFIX", "grant-state").strip("/") or "grant-state"
 _SIGNING_SECRET = os.environ.get("GRANT_SIGNING_SECRET", "").strip()
 MAGIC_LINK_TTL_MINUTES = max(1, min(1440, int(os.environ.get("GRANT_MAGIC_LINK_TTL_MINUTES", "30"))))
@@ -2095,9 +2103,10 @@ def guardrail_drawer(kind: str, org_id: str) -> str:
             "title": "Multi-approver routing",
             "detail": (
                 "Send code deploys to engineering and refunds over $500 to finance — "
-                "or require 2-of-3 approvals. Pro adds role rules and SMS/WhatsApp alerts."
+                "or require 2-of-3 approvals. Pro adds role rules and 1-year exports; "
+                "SMS / WhatsApp alerts are coming soon."
             ),
-            "summary": "multi-approver routing, SMS/WhatsApp alerts, and 1-year exports",
+            "summary": "multi-approver routing and 1-year exports",
             "cta": "See team approvals",
         },
     }
@@ -2358,7 +2367,8 @@ def plan_banners_html(context: dict[str, Any], rows: list[sqlite3.Row]) -> str:
     if "slack" not in current.channels:
         banners.append(
             f'<div class="banner">Waiting on email slows down demos. '
-            f'<a href="/pricing?{query}">Connect Slack / SMS approvals</a> — Plus adds webhook callbacks; Pro adds WhatsApp and compliance exports.</div>'
+            f'<a href="/pricing?{query}">See faster approvals</a> — Plus adds Slack and webhook callbacks; Pro adds multi-approver routing and compliance exports. '
+            f'SMS / WhatsApp alerts are coming soon.</div>'
         )
     return "".join(banners)
 
@@ -2823,12 +2833,28 @@ def docs_page() -> str:
     return page("Grant documentation", body, "Install and use Grant in any AI agent.")
 
 
+def pricing_feature(item: str) -> str:
+    """Do not advertise delivery channels Grant cannot actually send today."""
+    text = str(item or "")
+    if SMS_PROVIDER_CONFIGURED:
+        return text
+    if "sms" in text.lower() or "whatsapp" in text.lower():
+        return f"{text} — coming soon"
+    return text
+
+
 def pricing_page(org_id: str = "") -> str:
     org = safe_org_id(org_id)
     workspace_ready = bool(org and get_workspace(org))
     checkout_note = (
         '<p class="checkout-note">Use your Grant account email '
         '(user@email.com) at checkout for instant activation.</p>'
+    )
+    sms_note = (
+        ""
+        if SMS_PROVIDER_CONFIGURED
+        else '<p class="sub">SMS and WhatsApp approval alerts are Pro-tier features that are still '
+        'being connected; they are marked “coming soon” until a provider is configured.</p>'
     )
 
     def checkout_href(plan_id: str) -> str:
@@ -2864,7 +2890,7 @@ def pricing_page(org_id: str = "") -> str:
                 f'<a class="btn" data-grant-checkout href="{checkout_href(plan_id)}">'
                 f'Upgrade to {clean(row["name"])}</a>{checkout_note}'
             )
-        items = "".join(f"<li>{clean(item)}</li>" for item in row["features"])
+        items = "".join(f"<li>{clean(pricing_feature(item))}</li>" for item in row["features"])
         cards.append(
             f'<section class="tier{featured}">{badge}<h3>{clean(row["name"])}</h3>'
             f'<p class="position">{clean(row["positioning"])}</p>{price}'
@@ -2876,6 +2902,7 @@ def pricing_page(org_id: str = "") -> str:
   <span class="eyebrow"><span class="dot"></span> Pricing</span>
   <h1>Insurance for the moment<br><em>an agent acts.</em></h1>
   <p class="lede">Every plan starts with a 14-day Pro Guardrails trial. No card to try it. Paid plans use secure Cashfree-hosted payment links — Grant never touches money.</p>
+  {sms_note}
 </section>
 <section class="section glass" style="text-align:center">
   <div class="toggle" role="group" aria-label="Billing cycle">
@@ -3691,6 +3718,91 @@ async def billing_webhook(http_request: Request) -> JSONResponse:
             "applied": False,
             "stored_unclaimed": bool(receipt and record_unclaimed_payment(receipt)),
         }
+    )
+
+
+@app.get("/api/billing/status")
+async def billing_status(
+    http_request: Request, org_id: str = "", token: str = ""
+) -> JSONResponse:
+    """Ops-gated tier check used to verify webhook-driven activation."""
+    if not ops_authorized(http_request, token):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized.",
+            headers={"WWW-Authenticate": 'Basic realm="Grant Ops"'},
+        )
+    org = billing.safe_org_id(org_id)
+    if not org:
+        raise HTTPException(status_code=400, detail="A valid org_id is required.")
+    get_plan(org)
+    context = plan_context(org)
+    stored = get_organization(org)
+    return JSONResponse(
+        content={
+            "org_id": org,
+            "tier": plans.effective_tier(context["plan"]),
+            "stored_tier": str(stored["plan_tier"]) if stored else "",
+            "plan_status": str(context["plan"]["status"]),
+            "used": context["used"],
+            "limit": context["usage"]["limit"],
+            "trial_days_left": context["usage"]["trial_days_left"],
+            "cashfree_webhook_configured": bool(CASHFREE_WEBHOOK_SECRET),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/webhooks/cashfree/test")
+async def cashfree_test_webhook(http_request: Request, token: str = "") -> JSONResponse:
+    """Ops-only simulation of the signed webhook activation path.
+
+    No money moves. It runs the same ``apply_billing_event`` used by
+    ``/v1/billing/webhook`` so a live checkout can be verified end to end with
+    ``scripts/verify_cashfree.py``.
+    """
+    if APP_ENV == "production" and not ALLOW_TEST_WEBHOOK:
+        raise HTTPException(
+            status_code=403,
+            detail="Test webhook is disabled in production. Set GRANT_ALLOW_TEST_WEBHOOK=true to enable.",
+        )
+    if not ops_authorized(http_request, token):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized.",
+            headers={"WWW-Authenticate": 'Basic realm="Grant Ops"'},
+        )
+    data = await _request_fields(http_request)
+    org = billing.safe_org_id(data.get("org_id", ""))
+    plan = str(data.get("plan", "plus") or "plus").strip().lower()
+    if not org or plan not in {"plus", "pro"}:
+        raise HTTPException(status_code=400, detail="Supply a valid org_id and plan (plus or pro).")
+    get_plan(org)
+    before = plans.effective_tier(get_plan(org))
+    event_id = str(data.get("event_id", "") or "")[:120] or "test_" + new_code(12)
+    applied = apply_billing_event(
+        {
+            "org_id": org,
+            "event_id": event_id,
+            "tier": plan,
+            "status": "active",
+            "checkout_id": f"test_{new_code(9)}",
+            "customer_ref": "",
+        }
+    )
+    after = plans.effective_tier(get_plan(org))
+    return JSONResponse(
+        content={
+            "ok": True,
+            "simulation": True,
+            "applied": applied,
+            "org_id": org,
+            "event_id": event_id,
+            "before_tier": before,
+            "after_tier": after,
+            "note": "No payment was collected. This exercises the signed webhook activation path.",
+        },
+        headers={"Cache-Control": "no-store"},
     )
 
 

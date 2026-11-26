@@ -463,7 +463,7 @@ def test_pricing_page_has_four_tiers_annual_toggle_and_contact_cta(api):
         "Slack &amp; Webhook instant approvals (15,000/mo)",
         "30-day audit log retention",
         "Multi-approver routing &amp; role rules",
-        "SMS / WhatsApp approval alerts (100,000/mo)",
+        "SMS / WhatsApp approval alerts (100,000/mo) — coming soon",
         "1-year audit trail + CSV/JSON exports",
         "White-label domain &amp; custom branding",
         "SSO / SAML &amp; org directory sync",
@@ -519,7 +519,7 @@ def test_hard_quota_blocks_with_upgrade_metadata(api, monkeypatch):
     page = api.get(f"/w/{code}")
     assert "New approval requests are paused" in page.text
     assert "expire in 48 hours" in page.text
-    assert "Connect Slack / SMS approvals" in page.text
+    assert "SMS / WhatsApp alerts are coming soon" in page.text
 
 
 def test_approval_card_has_drawers_popup_metadata_and_compact_view(api):
@@ -1717,4 +1717,71 @@ def test_channel_and_auto_rule_gates_enforce_tiers(api):
     )
     assert decision.status_code == 403
     assert decision.json()["detail"]["required_tier"] == "plus"
+
+
+def test_pricing_marks_unconnected_mobile_channels_as_coming_soon(api):
+    page = api.get("/pricing?org_id=ws_pricing")
+    assert page.status_code == 200
+    assert "SMS / WhatsApp approval alerts (100,000/mo) — coming soon" in page.text
+    assert "marked “coming soon” until a provider is configured" in page.text
+    assert "hosted checkout is monthly-only today" in page.text
+
+
+def test_billing_status_is_ops_gated_and_reports_tier(api):
+    ensure_workspace("ws_billing_status")
+    force_tier("ws_billing_status", "plus")
+    unauthorized = api.get("/api/billing/status", params={"org_id": "ws_billing_status"})
+    assert unauthorized.status_code == 401
+
+    basic = base64.b64encode(f"ops:{os.environ['GRANT_OPS_TOKEN']}".encode("utf-8")).decode("ascii")
+    response = api.get(
+        "/api/billing/status",
+        params={"org_id": "ws_billing_status"},
+        headers={"Authorization": f"Basic {basic}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["org_id"] == "ws_billing_status"
+    assert body["tier"] == "plus" and body["stored_tier"] == "plus"
+    assert body["cashfree_webhook_configured"] is True
+
+
+def test_cashfree_test_webhook_activates_tier_and_is_idempotent(api, monkeypatch):
+    ensure_workspace("ws_cf_test")
+    force_tier("ws_cf_test", "free")
+    monkeypatch.setattr(main, "APP_ENV", "development")
+    monkeypatch.setattr(main, "ALLOW_TEST_WEBHOOK", True)
+    token = os.environ["GRANT_OPS_TOKEN"]
+
+    unauthenticated = api.post(
+        "/api/webhooks/cashfree/test", json={"org_id": "ws_cf_test", "plan": "plus"}
+    )
+    assert unauthenticated.status_code == 401
+    bad_request = api.post(
+        "/api/webhooks/cashfree/test", params={"token": token}, json={}
+    )
+    assert bad_request.status_code == 400
+
+    event = api.post(
+        "/api/webhooks/cashfree/test",
+        params={"token": token},
+        json={"org_id": "ws_cf_test", "plan": "plus", "event_id": "test_gap6_1"},
+    )
+    assert event.status_code == 200
+    body = event.json()
+    assert body["simulation"] is True and body["applied"] is True
+    assert body["before_tier"] == "free" and body["after_tier"] == "plus"
+
+    replay = api.post(
+        "/api/webhooks/cashfree/test",
+        params={"token": token},
+        json={"org_id": "ws_cf_test", "plan": "plus", "event_id": "test_gap6_1"},
+    )
+    assert replay.status_code == 200 and replay.json()["applied"] is False
+
+    with main.transaction() as conn:
+        stored = conn.execute(
+            "SELECT plan_tier FROM organizations WHERE id = ?", ("ws_cf_test",)
+        ).fetchone()
+    assert stored["plan_tier"] == "plus"
 
