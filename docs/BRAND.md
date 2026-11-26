@@ -6,15 +6,15 @@ Grant should feel like quiet infrastructure: paper, ink, glass, and a hint of ci
 
 | Token | Hex | Use |
 | --- | --- | --- |
-| Paper | `#F3EDE3` | Primary background |
-| Paper deep | `#E7DDD0` | Gradient shadow |
+| Paper | `#FAF8F5` | Primary background |
+| Paper deep | `#F2EFE8` | Gradient shadow |
 | Ink | `#2B1B20` | Body copy |
-| Burgundy | `#6D2038` | Primary action, seal, brand mark |
+| Burgundy | `#6d2038` | Primary action, seal, brand mark |
 | Burgundy soft | `#8C3A55` | Gradients |
 | Muted | `#7D6B69` | Secondary copy |
-| Hairline | `rgba(109,32,56,.16)` | Borders and dividers |
+| Hairline | `#E6E1D6` | Borders and dividers |
 
-No fluorescent greens, electric blues, cyberpunk purples, or glow-heavy gradients.
+The PWA manifest and `theme-color` use Paper `#FAF8F5` and Burgundy `#6d2038`. No fluorescent greens, electric blues, cyberpunk purples, or glow-heavy gradients.
 
 ## Type
 
@@ -61,5 +61,25 @@ Avoid:
 6. **Protected by Grant** — end-user view of authorized agents with a quiet builder CTA.
 7. **Ops** — token-gated aggregate counters, no raw activity feed or glitter.
 8. **Docs** — copy-paste first, concepts second.
+9. **Checkpoint** (`/approve/{req_id}`) — who/what/scope, then **Continue**, **Always allow**, and a subtle **Cancel**.
+10. **Signup** (`/signup`) — quiet sign-up with a mandatory **Add Shortcut** PWA install before continuing.
+11. **Receipt** (`/receipt/{req_id}`) — public signed receipt, no blank close screen.
+12. **Account** (`/account`) — standalone installed app for keys, rules, billing, and history.
 
 Every screen should work on mobile without horizontal scrolling.
+
+## Exact copy
+
+These strings are contract, not suggestions. Do not paraphrase them:
+
+- Every UI screen shows **“Grant never sees your credentials or payment details. It only records what you allowed.”**
+- Persistent watermark: **“● Protected by Grant · Zero-custody consent infrastructure”**
+- Builder CTA: **“Get Your Free API Key →”**
+- Pricing: Free $0; Plus **$20/mo / ₹2,400**; Pro **$150/mo**; Enterprise **$4,000/mo** (contact CTA). Annual figures are display-only; hosted checkout is monthly-only.
+- Cashfree phone placeholder is the server-only `9999999999`. Grant never collects a phone number, password, or card detail in the UI.
+
+## PWA
+
+- Assets: `/manifest.webmanifest`, `/sw.js`, `/icons/icon-192.svg`, `/icons/icon-512.svg`.
+- Manifest: `start_url: /account`, `display: standalone`, Paper `#FAF8F5` and Burgundy `#6d2038` for theme/background.
+- The install step is part of the sign-up flow: **Add Shortcut** must be offered and completed before continuing to `/account`. Keep the prompt calm and explain that it only adds a home-screen shortcut.

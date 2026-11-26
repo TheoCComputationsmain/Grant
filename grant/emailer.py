@@ -41,21 +41,15 @@ def provider_name(env: Mapping[str, str], *, production: bool) -> str:
     return "console" if not production else ""
 
 
-def _send_resend(env: Mapping[str, str], to: str, url: str) -> None:
+def _send_resend_message(
+    env: Mapping[str, str], to: str, subject: str, text: str
+) -> None:
     api_key = str(env.get("RESEND_API_KEY", "")).strip()
     sender = str(env.get("GRANT_EMAIL_FROM", "Grant <onboarding@resend.dev>")).strip()
     if not api_key:
         raise EmailError("RESEND_API_KEY is not configured.")
     payload = json.dumps(
-        {
-            "from": sender,
-            "to": [to],
-            "subject": "Your Grant sign-in link",
-            "text": (
-                "Open this link to sign in to Grant. It expires soon and can only "
-                f"be used once.\n\n{url}\n\nIf you did not request this, ignore it.\n"
-            ),
-        }
+        {"from": sender, "to": [to], "subject": subject, "text": text}
     ).encode("utf-8")
     req = request.Request(
         RESEND_URL,
@@ -73,7 +67,9 @@ def _send_resend(env: Mapping[str, str], to: str, url: str) -> None:
         raise EmailError("Resend is unreachable.") from exc
 
 
-def _send_smtp(env: Mapping[str, str], to: str, url: str) -> None:
+def _send_smtp_message(
+    env: Mapping[str, str], to: str, subject: str, text: str
+) -> None:
     host = str(env.get("SMTP_HOST", "")).strip()
     port = int(str(env.get("SMTP_PORT", "587")).strip() or 587)
     sender = str(env.get("GRANT_EMAIL_FROM", env.get("SMTP_FROM", ""))).strip()
@@ -82,11 +78,8 @@ def _send_smtp(env: Mapping[str, str], to: str, url: str) -> None:
     message = EmailMessage()
     message["From"] = sender
     message["To"] = to
-    message["Subject"] = "Your Grant sign-in link"
-    message.set_content(
-        "Open this link to sign in to Grant. It expires soon and can only be "
-        f"used once.\n\n{url}\n\nIf you did not request this, ignore it.\n"
-    )
+    message["Subject"] = subject
+    message.set_content(text)
     user = str(env.get("SMTP_USER", "")).strip()
     password = str(env.get("SMTP_PASSWORD", "")).strip()
     try:
@@ -106,6 +99,30 @@ def _send_smtp(env: Mapping[str, str], to: str, url: str) -> None:
         raise EmailError("SMTP delivery failed.") from exc
 
 
+def _send_resend(env: Mapping[str, str], to: str, url: str) -> None:
+    _send_resend_message(
+        env,
+        to,
+        "Your Grant sign-in link",
+        "Open this link to sign in to Grant. It expires soon and can only "
+        f"be used once.\n\n{url}\n\nIf you did not request this, ignore it.\n",
+    )
+
+
+def _send_smtp(env: Mapping[str, str], to: str, url: str) -> None:
+    _send_smtp_message(
+        env,
+        to,
+        "Your Grant sign-in link",
+        "Open this link to sign in to Grant. It expires soon and can only "
+        f"be used once.\n\n{url}\n\nIf you did not request this, ignore it.\n",
+    )
+
+
+def _delivery(env: Mapping[str, str], *, production: bool) -> str:
+    return provider_name(env, production=production)
+
+
 def send_magic_link(to: str, url: str, env: Mapping[str, str] | None = None) -> str:
     """Deliver a one-time sign-in link. Returns the provider name."""
     environ = env if env is not None else os.environ
@@ -113,7 +130,7 @@ def send_magic_link(to: str, url: str, env: Mapping[str, str] | None = None) -> 
         str(environ.get("GRANT_APP_ENV", "development")).strip().lower() == "production"
         or str(environ.get("VERCEL", "")).strip() == "1"
     )
-    provider = provider_name(environ, production=production)
+    provider = _delivery(environ, production=production)
     if provider == "resend":
         _send_resend(environ, to, url)
         return provider
@@ -126,5 +143,34 @@ def send_magic_link(to: str, url: str, env: Mapping[str, str] | None = None) -> 
                 "No email provider configured. Set RESEND_API_KEY or SMTP_HOST."
             )
         print(f"[Grant magic link for {mask_email(to)}] {url}")
+        return provider
+    raise EmailError("No email provider configured.")
+
+
+def send_otp(to: str, code: str, env: Mapping[str, str] | None = None) -> str:
+    """Deliver a one-time numeric sign-in code. Returns the provider name."""
+    environ = env if env is not None else os.environ
+    production = (
+        str(environ.get("GRANT_APP_ENV", "development")).strip().lower() == "production"
+        or str(environ.get("VERCEL", "")).strip() == "1"
+    )
+    provider = _delivery(environ, production=production)
+    text = (
+        "Your Grant sign-in code is "
+        f"{code}. It expires in 10 minutes and works once.\n\n"
+        "If you did not request this, ignore this message.\n"
+    )
+    if provider == "resend":
+        _send_resend_message(environ, to, "Your Grant sign-in code", text)
+        return provider
+    if provider == "smtp":
+        _send_smtp_message(environ, to, "Your Grant sign-in code", text)
+        return provider
+    if provider == "console":
+        if production:
+            raise EmailError(
+                "No email provider configured. Set RESEND_API_KEY or SMTP_HOST."
+            )
+        print(f"[Grant sign-in code for {mask_email(to)}] {code}")
         return provider
     raise EmailError("No email provider configured.")

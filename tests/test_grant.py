@@ -12,7 +12,7 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 TEST_DB = Path(tempfile.gettempdir()) / "grant_test.db"
 if TEST_DB.exists():
@@ -1818,4 +1818,468 @@ def test_test_webhook_is_disabled_in_production(api, monkeypatch):
     )
     assert response.status_code == 403
     assert "GRANT_ALLOW_TEST_WEBHOOK" in response.json()["detail"]
+
+
+PRIVACY_LINE = (
+    "Grant never sees your credentials or payment details. It only records what you allowed."
+)
+WATERMARK = "● Protected by Grant · Zero-custody consent infrastructure"
+
+
+def test_public_openapi_31_is_aliased_and_cors_enabled(api):
+    for path in ("/openapi.json", "/api/openapi.json"):
+        response = api.get(path)
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "*"
+        document = response.json()
+        assert document["openapi"].startswith("3.1")
+        assert PRIVACY_LINE in document["info"]["description"]
+        assert set(document["paths"]) >= {
+            "/openapi.json",
+            "/api/openapi.json",
+            "/api/mcp",
+            "/v1/gate/webhook",
+            "/receipt/{req_id}",
+        }
+        assert document["components"]["securitySchemes"]["GrantLiveKey"]["bearerFormat"] == "gr_live_"
+        assert document["x-grant"]["demo_limit_per_hour"] == main.DEMO_LIMIT_PER_HOUR
+
+
+def test_mcp_implements_json_rpc_methods_and_tools(api, monkeypatch):
+    counter = {"value": 0}
+
+    def unique_ip(request):
+        counter["value"] += 1
+        return f"mcp-methods-{counter['value']}"
+
+    monkeypatch.setattr(main.telemetry, "ip_hash", unique_ip)
+    initialize = api.post(
+        "/api/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    assert initialize.status_code == 200
+    assert initialize.json()["result"]["serverInfo"]["name"] == "grant"
+
+    setup = api.get("/api/mcp")
+    assert setup.status_code == 200
+    assert "/api/mcp" in setup.text
+    assert PRIVACY_LINE in setup.text
+
+    listing = api.post(
+        "/api/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+    ).json()
+    names = {tool["name"] for tool in listing["result"]["tools"]}
+    assert names == {"grant.request_approval", "grant.get_request"}
+
+    created = api.post(
+        "/api/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "grant.request_approval",
+                "arguments": {
+                    "agent_name": "mcp-agent",
+                    "tool_name": "send_note",
+                    "summary": "Send one note",
+                    "scope": {"channel": "team", "email": "hidden@example.test"},
+                    "workspace": "mcp_demo",
+                },
+            },
+        },
+    ).json()
+    result = created["result"]
+    assert result["approval_url"].startswith("/receipt/") is False
+    assert result["request_id"].startswith("req_")
+    assert "hidden@example.test" not in json.dumps(result)
+
+    status = api.post(
+        "/api/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "grant.get_request", "arguments": {"request_id": result["request_id"]}},
+        },
+    ).json()["result"]
+    assert status["status"] == "pending"
+    assert status["receipt_url"] == f"/receipt/{result['request_id']}"
+
+    unknown = api.post(
+        "/api/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "nope"}
+    ).json()
+    assert unknown["error"]["code"] == -32601
+
+
+def test_demo_limiter_is_20_per_hour_and_keys_bypass(api, monkeypatch):
+    monkeypatch.setattr(main, "DEMO_LIMIT_PER_HOUR", 2)
+    monkeypatch.setattr(main.telemetry, "ip_hash", lambda request: "demo-limit-ip")
+    with main.transaction() as conn:
+        conn.execute("DELETE FROM demo_rate_limits WHERE ip_hash = ?", ("demo-limit-ip",))
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    assert api.post("/api/mcp", json=body).status_code == 200
+    assert api.post("/api/mcp", json=body).status_code == 200
+    limited = api.post("/api/mcp", json=body)
+    assert limited.status_code == 429
+    assert "Demo limit" in limited.json()["detail"]
+
+    with main.transaction() as conn:
+        _, raw = main.mint_api_key(conn, "public", "usr_demo", "limiter bypass")
+    authorized = api.post(
+        "/api/mcp", json=body, headers={"Authorization": f"Bearer {raw}"}
+    )
+    assert authorized.status_code == 200
+
+    forged = api.post(
+        "/api/mcp", json=body, headers={"Authorization": "Bearer gr_live_not_a_real_key"}
+    )
+    assert forged.status_code == 401
+
+
+def test_gate_webhook_applies_rules_first_and_dispatches_signed_callback(api, monkeypatch):
+    org = "gate_auto"
+    ensure_workspace(org)
+    force_tier(org, "plus")
+    rule = api.post(
+        "/v1/rules",
+        json={
+            "workspace": org,
+            "agent": "gate-agent",
+            "action": "transfer_funds",
+            "scope": {"amount": 50},
+            "max_amount": 100,
+        },
+    )
+    assert rule.status_code == 201
+
+    calls = []
+
+    def fake_post(url, body, headers):
+        calls.append((url, body, headers))
+        return 204
+
+    monkeypatch.setattr(main, "_post_callback", fake_post)
+    monkeypatch.setattr(main.telemetry, "ip_hash", lambda request: "gate-auto-ip")
+    secret = "gate-callback-secret"
+    response = api.post(
+        "/v1/gate/webhook",
+        json={
+            "agent_name": "gate-agent",
+            "tool_name": "transfer_funds",
+            "reason": "Pay one invoice",
+            "scope": {"amount": 50},
+            "workspace": org,
+            "callback_url": "https://hooks.example.test/grant",
+            "callback_secret": secret,
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "approved"
+    assert body["rule_id"] == rule.json()["id"]
+    assert body["signed_receipt"]
+    assert len(calls) == 1
+
+    url, callback, headers = calls[0]
+    assert url == "https://hooks.example.test/grant"
+    assert "amount" not in callback
+    assert secret not in json.dumps(callback)
+    assert headers["x-grant-signature"] == "sha256=" + main.callback_signature(
+        callback, secret, headers["x-grant-timestamp"]
+    )
+    verified, payload = main.verify_signed_receipt(callback["signed_receipt"])
+    assert verified is True
+    assert payload["decision_type"] == "always_allow"
+
+
+def test_gate_webhook_callback_retries_twice(api, monkeypatch):
+    ensure_workspace("gate_retry")
+    force_tier("gate_retry", "plus")
+    attempts = []
+
+    def failing_post(url, body, headers):
+        attempts.append(url)
+        return 500
+
+    monkeypatch.setattr(main, "_post_callback", failing_post)
+    monkeypatch.setattr(main.telemetry, "ip_hash", lambda request: "gate-retry-ip")
+    response = api.post(
+        "/v1/gate/webhook",
+        json={
+            "agent": "retry-agent",
+            "action": "send_report",
+            "summary": "Send the report",
+            "scope": {},
+            "workspace": "gate_retry",
+            "callback_url": "https://hooks.example.test/retry",
+        },
+    )
+    assert response.status_code == 202
+    assert len(attempts) == main.CALLBACK_MAX_RETRIES + 1 == 3
+
+
+def test_gate_webhook_callback_is_hard_gated_to_plus(api, monkeypatch):
+    org = "gate_locked"
+    ensure_workspace(org)
+    force_tier(org, "free")
+    monkeypatch.setattr(main.telemetry, "ip_hash", lambda request: "gate-locked-ip")
+    response = api.post(
+        "/v1/gate/webhook",
+        json={
+            "agent": "locked-agent",
+            "action": "send_report",
+            "summary": "Send the report",
+            "scope": {},
+            "workspace": org,
+            "callback_url": "https://hooks.example.test/locked",
+        },
+    )
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["error"] == "upgrade_required"
+    assert detail["required_tier"] == "plus"
+    assert detail["feature"] == "instant_delivery"
+
+
+def test_checkpoint_and_public_receipt_are_signed_and_private(api):
+    body = create(
+        api,
+        agent="checkpoint-agent",
+        action="refund_order",
+        scope={"email": "hidden@example.test", "api_key": "sk-secret-secret-secret"},
+    )
+    request_id = body["id"]
+    page = api.get(f"/approve/{request_id}")
+    assert page.status_code == 200
+    assert "Continue" in page.text
+    assert "Always allow" in page.text
+    assert "Cancel" in page.text
+    assert "Scope fingerprint" in page.text
+    assert PRIVACY_LINE in page.text
+    assert WATERMARK in page.text
+    assert "hidden@example.test" not in page.text
+    assert "sk-secret-secret-secret" not in page.text
+
+    decided = api.post(
+        f"/approve/{request_id}/decide", data={"decision": "approve"}, follow_redirects=False
+    )
+    assert decided.status_code == 303
+    assert decided.headers["location"] == f"/receipt/{request_id}"
+
+    with main.closing(main.db()) as conn:
+        canonical = conn.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (request_id,)
+        ).fetchone()
+    verified, payload = main.verify_signed_receipt(canonical["signed_receipt"])
+    assert verified is True
+    assert payload["status"] == "approved"
+    assert payload["decision_type"] == "continue_once"
+
+    receipt = api.get(decided.headers["location"])
+    assert receipt.status_code == 200
+    assert "Signature verified" in receipt.text
+    assert "Get Your Free API Key →" in receipt.text
+    assert WATERMARK in receipt.text
+    assert PRIVACY_LINE in receipt.text
+    assert "hidden@example.test" not in receipt.text
+    assert "sk-secret-secret-secret" not in receipt.text
+
+
+def test_pwa_manifest_service_worker_and_icons(api):
+    manifest = api.get("/manifest.webmanifest")
+    assert manifest.status_code == 200
+    assert manifest.headers["content-type"].startswith("application/manifest+json")
+    data = manifest.json()
+    assert data["start_url"] == "/account"
+    assert data["display"] == "standalone"
+    assert data["background_color"] == "#FAF8F5"
+    assert data["theme_color"] == "#FAF8F5"
+    assert {icon["sizes"] for icon in data["icons"]} == {"192x192", "512x512"}
+
+    worker = api.get("/sw.js")
+    assert worker.status_code == 200
+    assert "grant-shell-v1" in worker.text
+    assert "Private screens such as /account are never cached" in worker.text
+
+    for size in (192, 512):
+        icon = api.get(f"/icons/icon-{size}.svg")
+        assert icon.status_code == 200
+        assert icon.headers["content-type"].startswith("image/svg+xml")
+        assert f'width="{size}"' in icon.text
+        assert f'height="{size}"' in icon.text
+
+
+def magic_sign_in(client, email: str) -> str:
+    sent = client.post(
+        "/v1/auth/magic-link", json={"email": email, "next": "/account"}
+    )
+    assert sent.status_code == 200
+    token = _magic_token(sent.json()["dev_link"])
+    verified = client.get(
+        f"/auth/verify?{urlencode({'token': token})}", follow_redirects=False
+    )
+    assert verified.status_code == 303
+    client.cookies.set(main.SESSION_COOKIE, verified.cookies[main.SESSION_COOKIE])
+    return urlsplit(verified.headers["location"]).path.rsplit("/", 1)[-1]
+
+
+def test_account_app_mints_keys_updates_rules_and_masks_identity():
+    email = "account-owner@example.test"
+    with TestClient(main.app) as client:
+        org = magic_sign_in(client, email)
+        force_tier(org, "plus")
+        account = client.get("/account")
+        assert account.status_code == 200
+        assert "Your quiet control room." in account.text
+        assert main.emailer.mask_email(email) in account.text
+        assert email not in account.text
+        assert PRIVACY_LINE in account.text
+        assert "Login & device history" in account.text
+        assert "/openapi.json" in account.text
+        assert "/api/mcp" in account.text
+
+        minted = client.post("/account/keys", data={"name": "laptop"})
+        assert minted.status_code == 200
+        match = re.search(r"gr_live_[A-Za-z0-9_-]{20,}", minted.text)
+        assert match is not None
+        raw = match.group(0)
+        with main.closing(main.db()) as conn:
+            row = conn.execute(
+                "SELECT * FROM api_keys WHERE key_prefix = ?", (raw[: main.API_KEY_PREFIX.__len__() + 8],)
+            ).fetchone()
+        assert row["key_hash"] == main.hash_token(raw)
+        assert raw not in str(dict(row))
+        rpc = client.post(
+            "/api/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert rpc.status_code == 200
+
+        rule = client.post(
+            "/v1/rules",
+            json={"workspace": org, "agent": "ops-agent", "action": "refund", "max_amount": 25},
+        )
+        assert rule.status_code == 201
+        rule_id = rule.json()["id"]
+        capped = client.post(
+            f"/account/rules/{rule_id}/cap", data={"max_amount": "75"}, follow_redirects=False
+        )
+        assert capped.status_code == 303
+        with main.closing(main.db()) as conn:
+            stored = conn.execute(
+                "SELECT max_amount FROM auto_approve_rules WHERE id = ?", (rule_id,)
+            ).fetchone()
+        assert stored["max_amount"] == 75
+        revoked = client.post(
+            f"/account/rules/{rule_id}/revoke", follow_redirects=False
+        )
+        assert revoked.status_code == 303
+        with main.closing(main.db()) as conn:
+            revoked_row = conn.execute(
+                "SELECT status FROM auto_approve_rules WHERE id = ?", (rule_id,)
+            ).fetchone()
+        assert revoked_row["status"] == "revoked"
+
+        assert main.record_unclaimed_payment(
+            {
+                "event_id": "evt_account_claim",
+                "payment_ref": "txn_account_claim",
+                "email": email,
+                "tier": "plus",
+                "paid_at": main.iso(),
+            }
+        )
+        claimed = client.post(
+            "/account/claim", data={"claim": email}, follow_redirects=False
+        )
+        assert claimed.headers["location"] == "/account?claim=ok"
+        with main.closing(main.db()) as conn:
+            user = conn.execute("SELECT plan_tier FROM users WHERE email = ?", (email,)).fetchone()
+        assert user["plan_tier"] == "plus"
+
+
+def test_signup_requires_shortcut_and_uses_email_flow():
+    with TestClient(main.app) as client:
+        blocked = client.get("/signup?next=/account")
+        assert blocked.status_code == 200
+        assert "Add Shortcut" in blocked.text
+        assert WATERMARK in blocked.text
+        assert PRIVACY_LINE in blocked.text
+
+        denied = client.post(
+            "/signup",
+            data={"email": "signup-user@example.test", "installed": "0", "next": "/account"},
+            follow_redirects=False,
+        )
+        assert denied.status_code == 303
+        assert "error=1" in denied.headers["location"]
+
+        accepted = client.post(
+            "/signup",
+            data={"email": "signup-user@example.test", "installed": "1", "next": "/account"},
+        )
+        assert accepted.status_code == 200
+        assert "Check your email." in accepted.text
+        assert "/auth/verify" in accepted.text
+        assert WATERMARK in accepted.text
+
+
+def test_email_otp_is_one_time_and_stores_only_a_digest():
+    email = "otp-user@example.test"
+    with TestClient(main.app) as client:
+        sent = client.post(
+            "/v1/auth/otp", json={"email": email, "next": "/account"}
+        )
+        assert sent.status_code == 200
+        assert sent.json()["delivery"] == "console"
+        code = sent.json()["dev_code"]
+        verified = client.post(
+            "/v1/auth/otp/verify", json={"email": email, "code": code, "next": "/account"}
+        )
+        assert verified.status_code == 200
+        assert verified.json()["next"] == "/account"
+        replay = client.post(
+            "/v1/auth/otp/verify", json={"email": email, "code": code}
+        )
+        assert replay.status_code == 400
+
+    with main.closing(main.db()) as conn:
+        row = conn.execute(
+            "SELECT * FROM magic_links WHERE email = ? ORDER BY created_at DESC LIMIT 1", (email,)
+        ).fetchone()
+    assert row["otp_hash"] == main.hash_token(f"otp|{email}|{code}")
+    assert code not in str(dict(row))
+
+
+def test_cashfree_webhook_alias_syncs_the_email_owner():
+    email = "alias-owner@example.test"
+    with TestClient(main.app) as client:
+        org = magic_sign_in(client, email)
+        force_tier(org, "free")
+        event = {
+            "type": "PAYMENT_FORM_ORDER_WEBHOOK",
+            "data": {
+                "form": {"form_id": "grant_plus_monthly_inr"},
+                "order": {
+                    "order_status": "PAID",
+                    "transaction_id": "txn_alias_owner",
+                    "customer_details": {"customer_email": email},
+                },
+            },
+        }
+        raw, headers = signed_cashfree_webhook(event)
+        response = client.post("/api/webhooks/cashfree", content=raw, headers=headers)
+        assert response.status_code == 200
+        assert response.json()["applied"] is True
+        assert email not in response.text
+    with main.closing(main.db()) as conn:
+        user = conn.execute("SELECT plan_tier FROM users WHERE email = ?", (email,)).fetchone()
+        payment = conn.execute(
+            "SELECT status, workspace FROM unclaimed_payments WHERE payment_ref = ?",
+            ("txn_alias_owner",),
+        ).fetchone()
+    assert user["plan_tier"] == "plus"
+    assert payment is None
 

@@ -248,3 +248,60 @@ CREATE INDEX IF NOT EXISTS idx_rules_claim ON auto_approve_rules(claim_token);
 CREATE INDEX IF NOT EXISTS idx_approval_org ON approval_requests(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_magic_email ON magic_links(email, created_at DESC);
+
+-- Full-product contract columns. These are additive so existing workspaces,
+-- gateways and signed receipts keep working. JSON-bearing columns store
+-- canonical JSON text; Postgres reads them as JSON through the application.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_tier TEXT NOT NULL DEFAULT 'free';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS monthly_quota INT NOT NULL DEFAULT 1000;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approvals_used INT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_expires_at TIMESTAMPTZ;
+
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS agent_name TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS tool_name TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS callback_url TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS callback_secret TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS decision_type TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS signed_receipt TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS decided_at TEXT;
+
+ALTER TABLE auto_approve_rules ADD COLUMN IF NOT EXISTS device_hash TEXT;
+ALTER TABLE auto_approve_rules ADD COLUMN IF NOT EXISTS agent_name TEXT;
+ALTER TABLE auto_approve_rules ADD COLUMN IF NOT EXISTS tool_name TEXT;
+ALTER TABLE auto_approve_rules ADD COLUMN IF NOT EXISTS condition_json TEXT;
+ALTER TABLE auto_approve_rules ADD COLUMN IF NOT EXISTS expires_at TEXT;
+ALTER TABLE auto_approve_rules ADD COLUMN IF NOT EXISTS revoked_at TEXT;
+
+ALTER TABLE unclaimed_payments ADD COLUMN IF NOT EXISTS id TEXT;
+ALTER TABLE unclaimed_payments ADD COLUMN IF NOT EXISTS cf_payment_id TEXT UNIQUE;
+ALTER TABLE unclaimed_payments ADD COLUMN IF NOT EXISTS customer_email TEXT NOT NULL DEFAULT '';
+ALTER TABLE unclaimed_payments ADD COLUMN IF NOT EXISTS plan_tier TEXT NOT NULL DEFAULT '';
+ALTER TABLE unclaimed_payments ADD COLUMN IF NOT EXISTS amount NUMERIC;
+ALTER TABLE unclaimed_payments ADD COLUMN IF NOT EXISTS claimed_by_user_id TEXT;
+
+ALTER TABLE magic_links ADD COLUMN IF NOT EXISTS otp_hash TEXT;
+
+CREATE TABLE IF NOT EXISTS demo_rate_limits (
+    ip_hash TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    used INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (ip_hash, bucket)
+);
+
+UPDATE approval_requests SET agent_name = agent WHERE agent_name IS NULL OR agent_name = '';
+UPDATE approval_requests SET tool_name = action WHERE tool_name IS NULL OR tool_name = '';
+UPDATE auto_approve_rules SET agent_name = agent WHERE agent_name IS NULL OR agent_name = '';
+UPDATE auto_approve_rules SET tool_name = action WHERE tool_name IS NULL OR tool_name = '';
+UPDATE unclaimed_payments SET customer_email = email
+    WHERE customer_email IS NULL OR customer_email = '';
+UPDATE unclaimed_payments SET plan_tier = tier WHERE plan_tier IS NULL OR plan_tier = '';
+UPDATE unclaimed_payments SET id = event_id WHERE id IS NULL OR id = '';
+UPDATE unclaimed_payments SET cf_payment_id = payment_ref WHERE cf_payment_id IS NULL OR cf_payment_id = '';
+
+CREATE INDEX IF NOT EXISTS idx_approvals_public_id ON approval_requests(id, status);
+CREATE INDEX IF NOT EXISTS idx_rules_public_match ON auto_approve_rules(org_id, agent_name, tool_name, status);
+CREATE INDEX IF NOT EXISTS idx_rules_claim_user ON auto_approve_rules(user_id, claim_token);
+CREATE INDEX IF NOT EXISTS idx_unclaimed_cf_payment ON unclaimed_payments(cf_payment_id);
+CREATE INDEX IF NOT EXISTS idx_unclaimed_customer ON unclaimed_payments(customer_email, plan_tier);
+CREATE INDEX IF NOT EXISTS idx_users_plan ON users(plan_tier, plan_expires_at);

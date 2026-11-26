@@ -14,19 +14,21 @@ Set these in Vercel Production:
 | `BLOB_STORE_ID` | Yes on Vercel | Private Vercel Blob store for cross-instance gateway decisions |
 | `GRANT_BLOB_PREFIX` | No | Object prefix inside Blob, default `grant-state` |
 | `GRANT_RATE_LIMIT_PER_MIN` | No | Requests per IP per minute, default `60` |
+| `GRANT_DEMO_LIMIT_PER_HOUR` | No | Omitted-auth demo limit on public integration endpoints, default `20` per hashed IP/hour; valid `Authorization: Bearer gr_live_…` keys bypass it |
+| `GRANT_CALLBACK_MAX_RETRIES` | No | Maximum retries for signed decision callbacks, default `2` |
 | `GRANT_GATEWAY_WAIT_SECONDS` | No | Seconds gateway waits for approval, default `20`, max `45` |
 | `GRANT_ALLOW_HTTP_UPSTREAMS` | No | Set `true` only if production must allow `http://` upstreams |
 | `GRANT_APP_ENV` | Recommended | `development` or `production`. Vercel sets `VERCEL=1`, which is always treated as production; production requires `DATABASE_URL` and a configured email provider |
 | `GRANT_ALLOW_SQLITE_IN_PROD` | No | Escape hatch only; set `true` to explicitly allow ephemeral SQLite in production |
-| `GRANT_EMAIL_PROVIDER` | No | `resend`, `smtp`, or `console`. Auto-detected from the credentials below |
-| `RESEND_API_KEY` | For magic links | Resend API key for one-time sign-in email |
-| `GRANT_EMAIL_FROM` | For magic links | Verified From address for Resend or SMTP |
-| `SMTP_HOST` / `SMTP_PORT` | For magic links | SMTP server and port (default `587`) |
+| `GRANT_EMAIL_PROVIDER` | No | `resend`, `smtp`, or `console`. Auto-detected from the credentials below; required in production for magic links and email OTP |
+| `RESEND_API_KEY` | For sign-in email | Resend API key for magic links and email OTP |
+| `GRANT_EMAIL_FROM` | For sign-in email | Verified From address for Resend or SMTP |
+| `SMTP_HOST` / `SMTP_PORT` | For sign-in email | SMTP server and port (default `587`) |
 | `SMTP_USER` / `SMTP_PASSWORD` | No | SMTP credentials when the server requires authentication |
 | `SMTP_TLS` | No | STARTTLS toggle, default `true` (`465` uses implicit TLS) |
 | `GRANT_MAGIC_LINK_TTL_MINUTES` | No | Magic-link lifetime, default `30` |
 | `GRANT_SESSION_DAYS` | No | Session cookie lifetime in days, default `30` |
-| `GRANT_ALLOW_TEST_WEBHOOK` | For live verification | Set `true` to permit ops-only `POST /api/webhooks/cashfree/test` in production |
+| `GRANT_ALLOW_TEST_WEBHOOK` | For live verification | Set `true` only to permit ops-only `POST /api/webhooks/cashfree/test`; never enable in production unless explicitly simulating a billing event |
 | `GRANT_CASHFREE_APP_ID` | For paid plans | Cashfree App ID |
 | `GRANT_CASHFREE_SECRET_KEY` | For paid plans | Cashfree Secret Key |
 | `GRANT_CASHFREE_API_VERSION` | No | Cashfree API version, default `2026-01-01` |
@@ -37,8 +39,8 @@ Set these in Vercel Production:
 | `GRANT_CASHFREE_PLACEHOLDER_PHONE` | Production | Server-only phone value required by Cashfree `/links` |
 | `GRANT_ENTERPRISE_CONTACT_URL` | No | Booking/contact URL for Enterprise CTA |
 | `GRANT_BILLING_WEBHOOK_SECRET` | Legacy fallback | Grant-format HMAC secret for manual plan-flip events |
-| `GRANT_CASHFREE_PLUS_MONTHLY_URL` | No | Optional Plus monthly form override; must be an allowlisted Cashfree host |
-| `GRANT_CASHFREE_PRO_MONTHLY_URL` | No | Optional Pro monthly form override; must be an allowlisted Cashfree host |
+| `GRANT_CASHFREE_PLUS_MONTHLY_URL` | No | Optional Plus monthly form override; must be an allowlisted Cashfree host (no `GRANT_CASHFREE_MONTHLY_PLUS_URL` alias) |
+| `GRANT_CASHFREE_PRO_MONTHLY_URL` | No | Optional Pro monthly form override; must be an allowlisted Cashfree host (no `GRANT_CASHFREE_MONTHLY_PRO_URL` alias) |
 | `GRANT_CRON_SECRET` | For renewal cron | Bearer secret sent by Vercel Cron to `/v1/billing/renewal-reminders` |
 | `GRANT_RENEWAL_EMAIL_WEBHOOK_URL` | For renewal email | HTTPS webhook that delivers `{to, subject, text, tier, renewal_url}` |
 | `GRANT_RENEWAL_EMAIL_WEBHOOK_TOKEN` | No | Bearer token for the renewal email webhook |
@@ -61,7 +63,7 @@ Register this Cashfree webhook URL in the Cashfree dashboard for **both** Paymen
 https://grant-approve.vercel.app/v1/billing/webhook
 ```
 
-Grant requires `x-webhook-timestamp` and `x-webhook-signature`, verifies Base64 HMAC-SHA256 over `timestamp + raw_body`, and rejects stale or unsigned events. It resolves the tier from the permanent `link_id`/`form_id` or the paid amount, normalizes `customer_email` with `LOWER(TRIM(...))`, and matches it to a workspace billing email. A paid event sets `plan_expires_at` to 32 days out, resets the current month's usage, and queues a day-27 reminder. Unmatched paid receipts are stored only as verified unclaimed receipts; no phone, card, raw webhook payload, or payer email is logged or returned publicly.
+`POST /api/webhooks/cashfree` is an alias of `POST /v1/billing/webhook` and uses the same `GRANT_CASHFREE_WEBHOOK_SECRET`; register whichever path you point at Cashfree, both run the same signed plan-flip path. Grant requires `x-webhook-timestamp` and `x-webhook-signature`, verifies Base64 HMAC-SHA256 over `timestamp + raw_body`, and rejects stale or unsigned events. It resolves the tier from the permanent `link_id`/`form_id` or the paid amount, normalizes `customer_email` with `LOWER(TRIM(...))`, and matches it to a workspace billing email. A paid event sets `plan_expires_at` to 32 days out, resets the current month's usage, and queues a day-27 reminder. Unmatched paid receipts are stored only as verified rows in `unclaimed_payments`, claimable by checkout email or Cashfree Payment ID from `/account`; no phone, card, raw webhook payload, or payer email is logged or returned publicly.
 
 ## Cashfree live verification
 
@@ -80,6 +82,30 @@ python scripts/verify_cashfree.py --org ws_live --mode status
 
 `--mode simulate` calls ops-only `POST /api/webhooks/cashfree/test`, which runs the same `apply_billing_event` path as the signed webhook without moving money. It is disabled in production unless `GRANT_ALLOW_TEST_WEBHOOK=true`. Simulation is a control test, not proof of a real payment; only the hosted-form payment plus `verify` proves the end-to-end flow.
 
+## Zero-wrapper integration surfaces
+
+These public endpoints need no wrapper SDK. They send permissive CORS headers, so a browser client or MCP host can call them directly:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /openapi.json`, `GET /api/openapi.json` | OpenAPI 3.1 contract for the HTTP API |
+| `POST /api/mcp` | MCP JSON-RPC over HTTP: `initialize`, `tools/list`, `tools/call`. A browser `GET /api/mcp` returns the setup card |
+| `POST /v1/gate/webhook` | Approval entry point for incoming webhooks; matching auto-approve rules are evaluated first, otherwise a human checkpoint is created. Decisions are delivered as signed callbacks (HMAC) with at most 2 retries (`GRANT_CALLBACK_MAX_RETRIES`) |
+| `GET /receipt/{req_id}` | Public signed receipt page for a decided request; no account needed |
+
+Without an `Authorization` header, these integration endpoints run in demo mode: at most **20 requests per hour per hashed IP** (`GRANT_DEMO_LIMIT_PER_HOUR`). Raw IPs are never stored. A valid `Authorization: Bearer gr_live_…` key is not subject to that demo limiter. `/receipt/{req_id}` and `/approve/{req_id}` are capability pages, not public stats; keep them `noindex`.
+
+Identity also accepts email OTP in addition to magic links: `POST /v1/auth/otp` sends a one-time code and `POST /v1/auth/otp/verify` verifies it through the same session path as magic links. Only an OTP hash is stored (`magic_links.otp_hash`); delivery uses the provider configured above.
+
+## Checkpoint, signup, PWA, and account app
+
+- `GET /approve/{req_id}` is the checkpoint page: **Continue**, **Always allow**, and a subtle **Cancel**. The decision writes a signed receipt and fires the signed callback if one was registered.
+- `GET /signup` is the sign-up flow. **Add Shortcut** (PWA install) is mandatory before continuing to the workspace.
+- PWA assets are served at `/manifest.webmanifest`, `/sw.js`, `/icons/icon-192.svg`, and `/icons/icon-512.svg`. The manifest declares `start_url: /account`, `display: standalone`, and colors `#FAF8F5` and `#6d2038`.
+- `GET /account` is the standalone app: profile and plan, usage meter, Cashfree links, claim payment, rule kill switches, spend/scope cap editor, audit trail, login/device history, API-key minting, and the OpenAPI/MCP URLs.
+
+Every UI screen carries the exact trust line **“Grant never sees your credentials or payment details. It only records what you allowed.”**, the watermark **“● Protected by Grant · Zero-custody consent infrastructure”**, and the builder CTA **“Get Your Free API Key →”** where a CTA belongs. Exact pricing is Plus **$20/mo / ₹2,400**, Pro **$150/mo**, Enterprise **$4,000/mo**; annual amounts are display-only and Cashfree phone uses the server-only placeholder `9999999999`. See `docs/BRAND.md`.
+
 ## Deploy
 
 ```bash
@@ -95,7 +121,12 @@ Then verify:
 curl https://grant-approve.vercel.app/health/live
 curl https://grant-approve.vercel.app/health/ready
 curl https://grant-approve.vercel.app/stats.json
+curl https://grant-approve.vercel.app/openapi.json
+curl https://grant-approve.vercel.app/manifest.webmanifest
 curl https://grant-approve.vercel.app/grant-inject.js
+curl -X POST https://grant-approve.vercel.app/api/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}'
 curl -X POST https://grant-approve.vercel.app/v1/a2a/gate \
   -H "Content-Type: application/json" \
   -d '{"sender":"planner","receiver":"worker","task":"pay vendor"}'
@@ -110,7 +141,7 @@ Neon Postgres is the primary production store. When `DATABASE_URL` is set, every
 
 SQLite (`GRANT_DB`, `/tmp/grant.db` on Vercel) remains the zero-config local development store. It is ephemeral and instance-local and must not be used to claim durable history.
 
-Canonical durable tables include `users`, `organizations`, `api_keys`, `approval_requests`, `auto_approve_rules`, `login_history`, and `popup_impressions`. `workspaces` and `requests` are kept as hot compatibility tables and are dual-written with `organizations` and `approval_requests` so gateways and signed-receipt retries keep working. `magic_links` and `auth_sessions` store only token digests and expiries; no raw key or magic-link token is persisted.
+Canonical durable tables include `users`, `organizations`, `api_keys`, `approval_requests`, `auto_approve_rules`, `login_history`, and `popup_impressions`. `workspaces` and `requests` are kept as hot compatibility tables and are dual-written with `organizations` and `approval_requests` so gateways and signed-receipt retries keep working. `magic_links` and `auth_sessions` store only token digests and expiries; no raw key, magic-link token, or OTP is persisted. The additive full-product columns cover user plan/quota state, request ownership and signed receipts, callback secrets, rule conditions and kill switches, and `magic_links.otp_hash`; `demo_rate_limits` holds only hourly counters keyed by hashed IP.
 
 Gateway registrations, pending requests, and decisions are additionally mirrored to a private Vercel Blob store. Pending and decided states use separate immutable object paths, so a retry that lands on a different function instance still sees the human's decision instead of a stale pending copy. Blob stays the hot decision cache; Neon is the source of truth.
 
@@ -136,8 +167,8 @@ Open the private views with `?token=<GRANT_OPS_TOKEN>`, a `X-Grant-Ops-Token` he
 ## Search and discovery
 
 - Public, indexable: `/`, `/docs`, `/pricing`, `/stats`, `/start`.
-- Private, `noindex`: `/a/{token}`, `/r/`, `/w/{code}`, `/console`, `/ops`, `/login-history`, `/protected/{code}`.
-- Disallowed in `robots.txt`: `/a/`, `/r/`, `/v1/`, `/w/`, `/console`, `/ops`, `/login-history`, `/protected/`.
+- Private, `noindex`: `/a/{token}`, `/r/`, `/w/{code}`, `/console`, `/ops`, `/login-history`, `/protected/{code}`, `/approve/{req_id}`, `/receipt/{req_id}`, `/signup`, `/account`.
+- Disallowed in `robots.txt`: `/a/`, `/r/`, `/v1/`, `/w/`, `/console`, `/ops`, `/login-history`, `/protected/`, `/approve/`, `/receipt/`, `/account/`.
 - Source files: `public/robots.txt` and `public/sitemap.xml` use `https://grant-approve.vercel.app`; the same routes also render dynamically from `GRANT_PUBLIC_BASE_URL`.
 - Submit `/sitemap.xml` in Google Search Console.
 - Add Bing Webmaster verification when available.
@@ -191,6 +222,8 @@ Open the private views with `?token=<GRANT_OPS_TOKEN>`, a `X-Grant-Ops-Token` he
 - [ ] Browser extension package (injectable script and Shadow-DOM widget routes are live)
 - [ ] Neon DSN provisioned in Vercel (schema applies automatically once set)
 - [ ] Live paid Cashfree transaction verified end to end
+
+The zero-wrapper surfaces, checkpoint/signup, PWA assets, `/account` app, email OTP, and Cashfree webhook alias described above are part of the current uncommitted work; exercise them on the deployed preview before marking them live here.
 
 ## No outbound dependency
 

@@ -53,6 +53,8 @@ SMS_PROVIDER_CONFIGURED = bool(
     or os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
     or os.environ.get("GRANT_WHATSAPP_PROVIDER", "").strip()
 )
+DEMO_LIMIT_PER_HOUR = max(1, min(1000, int(os.environ.get("GRANT_DEMO_LIMIT_PER_HOUR", "20"))))
+CALLBACK_MAX_RETRIES = max(0, min(5, int(os.environ.get("GRANT_CALLBACK_MAX_RETRIES", "2"))))
 ALLOW_TEST_WEBHOOK = os.environ.get("GRANT_ALLOW_TEST_WEBHOOK", "").strip().lower() in {
     "1", "true", "yes"
 }
@@ -118,7 +120,7 @@ DEFAULT_SENSITIVE_PATH_PARTS = ("/transfer", "/payment", "/pay", "/refund", "/de
 ALLOWED_DECISIONS = frozenset({"approve", "auto_rule", "always", "reject"})
 SENSITIVE_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|"
-    r"passwd|authorization|credential|private[_-]?key|session)",
+    r"passwd|authorization|credential|private[_-]?key|session|email|phone|ssn|card|key)",
     re.IGNORECASE,
 )
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -497,6 +499,52 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_renewal_due ON renewal_reminders(status, due_at)"
         )
+        for table, column, declaration in (
+            ("users", "plan_tier", "TEXT NOT NULL DEFAULT 'free'"),
+            ("users", "monthly_quota", "INT NOT NULL DEFAULT 1000"),
+            ("users", "approvals_used", "INT NOT NULL DEFAULT 0"),
+            ("users", "plan_expires_at", "TEXT"),
+            ("approval_requests", "owner_user_id", "TEXT"),
+            ("approval_requests", "agent_name", "TEXT"),
+            ("approval_requests", "tool_name", "TEXT"),
+            ("approval_requests", "callback_url", "TEXT"),
+            ("approval_requests", "callback_secret", "TEXT"),
+            ("approval_requests", "decision_type", "TEXT"),
+            ("approval_requests", "signed_receipt", "TEXT"),
+            ("approval_requests", "decided_at", "TEXT"),
+            ("auto_approve_rules", "device_hash", "TEXT"),
+            ("auto_approve_rules", "agent_name", "TEXT"),
+            ("auto_approve_rules", "tool_name", "TEXT"),
+            ("auto_approve_rules", "condition_json", "TEXT"),
+            ("auto_approve_rules", "expires_at", "TEXT"),
+            ("auto_approve_rules", "revoked_at", "TEXT"),
+            ("magic_links", "otp_hash", "TEXT"),
+            ("unclaimed_payments", "id", "TEXT"),
+            ("unclaimed_payments", "cf_payment_id", "TEXT"),
+            ("unclaimed_payments", "customer_email", "TEXT NOT NULL DEFAULT ''"),
+            ("unclaimed_payments", "plan_tier", "TEXT NOT NULL DEFAULT ''"),
+            ("unclaimed_payments", "amount", "NUMERIC"),
+            ("unclaimed_payments", "claimed_by_user_id", "TEXT"),
+        ):
+            _ensure_column(conn, table, column, declaration)
+        conn.execute("UPDATE approval_requests SET agent_name = agent WHERE agent_name IS NULL OR agent_name = ''")
+        conn.execute("UPDATE approval_requests SET tool_name = action WHERE tool_name IS NULL OR tool_name = ''")
+        conn.execute("UPDATE auto_approve_rules SET agent_name = agent WHERE agent_name IS NULL OR agent_name = ''")
+        conn.execute("UPDATE auto_approve_rules SET tool_name = action WHERE tool_name IS NULL OR tool_name = ''")
+        conn.execute("UPDATE unclaimed_payments SET customer_email = email WHERE customer_email IS NULL OR customer_email = ''")
+        conn.execute("UPDATE unclaimed_payments SET plan_tier = tier WHERE plan_tier IS NULL OR plan_tier = ''")
+        conn.execute("UPDATE unclaimed_payments SET id = event_id WHERE id IS NULL OR id = ''")
+        conn.execute("UPDATE unclaimed_payments SET cf_payment_id = payment_ref WHERE cf_payment_id IS NULL OR cf_payment_id = ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS demo_rate_limits (
+                ip_hash TEXT NOT NULL,
+                bucket TEXT NOT NULL,
+                used INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (ip_hash, bucket)
+            )
+            """
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_requests_workspace ON requests(workspace, created_at DESC)"
         )
@@ -531,14 +579,32 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
+    openapi_url=None,
 )
 
 
-CORS_PUBLIC_PATHS = ("/v1/requests", "/v1/a2a/gate")
+CORS_PUBLIC_PATHS = (
+    "/v1/requests",
+    "/v1/a2a/gate",
+    "/openapi.json",
+    "/api/openapi.json",
+    "/api/mcp",
+    "/v1/gate/webhook",
+    "/v1/auth/otp",
+    "/v1/auth/otp/verify",
+    "/manifest.webmanifest",
+    "/sw.js",
+)
+
+
+CORS_PUBLIC_PREFIXES = ("/v1/requests/", "/receipt/", "/approve/", "/icons/")
 
 
 def cors_public_path(path: str) -> bool:
-    return path in CORS_PUBLIC_PATHS or path.startswith("/v1/requests/")
+    return (
+        path in CORS_PUBLIC_PATHS
+        or path.startswith(CORS_PUBLIC_PREFIXES)
+    )
 
 
 @app.middleware("http")
@@ -556,7 +622,7 @@ async def polish_headers(request: Request, call_next):
         response.headers["access-control-allow-origin"] = "*"
         response.headers["access-control-allow-methods"] = "GET, POST, OPTIONS"
         response.headers["access-control-allow-headers"] = (
-            "Content-Type, Idempotency-Key, X-Grant-Request-Id"
+            "Content-Type, Authorization, Idempotency-Key, X-Grant-Request-Id"
         )
         response.headers["access-control-max-age"] = "600"
     if "cache-control" not in response.headers:
@@ -590,13 +656,21 @@ def expiry_to_minutes(value: Any) -> int | None:
 
 
 class RequestIn(BaseModel):
-    agent: str = Field(min_length=1, max_length=120, validation_alias=AliasChoices("agent", "who"))
-    action: str = Field(min_length=1, max_length=120, validation_alias=AliasChoices("action", "what"))
-    summary: str = Field(min_length=1, max_length=500, validation_alias=AliasChoices("summary", "why"))
+    agent: str = Field(
+        min_length=1, max_length=120, validation_alias=AliasChoices("agent", "who", "agent_name")
+    )
+    action: str = Field(
+        min_length=1, max_length=120, validation_alias=AliasChoices("action", "what", "tool_name")
+    )
+    summary: str = Field(
+        min_length=1, max_length=500, validation_alias=AliasChoices("summary", "why", "reason")
+    )
     scope: dict[str, Any] = Field(default_factory=dict)
     requester: str = Field(default="agent", max_length=120)
     workspace: str = Field(default="public", max_length=60)
     callback_url: str = Field(default="", max_length=500)
+    callback_secret: str = Field(default="", max_length=200)
+    owner_user_id: str = Field(default="", max_length=120)
     ttl_minutes: int = Field(default=30, ge=1, le=10_080)
     parent_origin: str = Field(default="", max_length=200)
     channel: str = Field(default="browser_popup", max_length=40)
@@ -607,9 +681,22 @@ class RequestIn(BaseModel):
         if not isinstance(data, dict):
             return data
         values = dict(data)
-        for target, alias in (("agent", "who"), ("action", "what"), ("summary", "why")):
-            if target not in values and alias in values:
-                values[target] = values[alias]
+        for target, aliases in (
+            ("agent", ("who", "agent_name")),
+            ("action", ("what", "tool_name")),
+            ("summary", ("why", "reason")),
+        ):
+            if target not in values:
+                for alias in aliases:
+                    if alias in values:
+                        values[target] = values[alias]
+                        break
+        if "ttl_minutes" not in values and "expires_in_seconds" in values:
+            try:
+                seconds = int(values.get("expires_in_seconds"))
+                values["ttl_minutes"] = max(1, min(10_080, (seconds + 59) // 60))
+            except (TypeError, ValueError):
+                pass
         if "ttl_minutes" not in values and "expiry" in values:
             minutes = expiry_to_minutes(values.get("expiry"))
             if minutes is not None:
@@ -658,6 +745,67 @@ class RuleIn(BaseModel):
     max_amount: float | None = Field(default=None, ge=0)
     multi_approver: bool = False
     claim_token: str = Field(default="", max_length=120)
+    condition: dict[str, Any] | None = Field(default=None, max_length=200)
+    expires_in_seconds: int | None = Field(default=None, ge=60, le=31_536_000)
+    owner_user_id: str = Field(default="", max_length=120)
+
+
+class GateWebhookIn(BaseModel):
+    """Zero-wrapper gate call; aliases match the public API and MCP tool schema."""
+
+    agent: str = Field(
+        min_length=1, max_length=120, validation_alias=AliasChoices("agent", "agent_name", "who")
+    )
+    action: str = Field(
+        min_length=1, max_length=120, validation_alias=AliasChoices("action", "tool_name", "what")
+    )
+    summary: str = Field(
+        min_length=1, max_length=500, validation_alias=AliasChoices("summary", "why", "reason")
+    )
+    scope: dict[str, Any] = Field(default_factory=dict)
+    workspace: str = Field(default="public", max_length=60)
+    callback_url: str = Field(default="", max_length=500)
+    callback_secret: str = Field(default="", max_length=200)
+    owner_user_id: str = Field(default="", max_length=120)
+    ttl_minutes: int = Field(default=30, ge=1, le=10_080)
+    expires_in_seconds: int | None = Field(default=None, ge=60, le=604_800)
+    channel: str = Field(default="webhook", max_length=40)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        for target, aliases in (
+            ("agent", ("who", "agent_name")),
+            ("action", ("what", "tool_name")),
+            ("summary", ("why", "reason")),
+        ):
+            if target not in values:
+                for alias in aliases:
+                    if alias in values:
+                        values[target] = values[alias]
+                        break
+        if "ttl_minutes" not in values and "expires_in_seconds" in values:
+            try:
+                seconds = int(values.get("expires_in_seconds"))
+                values["ttl_minutes"] = max(1, min(10_080, (seconds + 59) // 60))
+            except (TypeError, ValueError):
+                pass
+        return values
+
+
+class OtpIn(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    next: str = Field(default="", max_length=200)
+    org_id: str = Field(default="", max_length=120)
+
+
+class OtpVerifyIn(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    code: str = Field(min_length=4, max_length=12)
+    next: str = Field(default="", max_length=200)
 
 
 def clean(value: Any, limit: int = 200) -> str:
@@ -731,6 +879,53 @@ def permission_dict(row: sqlite3.Row) -> dict[str, str]:
     return {**payload, "signature": sign_permission(payload)}
 
 
+def receipt_payload(
+    row: Any, decision: str, permission: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Minimal, shareable receipt payload. No scope values are ever included."""
+    approved = decision in {"approve", "auto_rule", "always"}
+    status = "approved" if approved else "cancelled"
+    return {
+        "request_id": str(row["id"]),
+        "status": status,
+        "decision_type": {
+            "approve": "continue_once",
+            "auto_rule": "always_allow",
+            "always": "always_allow",
+            "reject": "cancelled",
+        }.get(decision, decision),
+        "agent_name": str(row["agent"]),
+        "tool_name": str(row["action"]),
+        "scope_hash": str(row["scope_hash"]),
+        "algorithm": "HMAC-SHA256",
+        "permission_id": str(permission["id"]) if permission else "",
+        "decided_at": iso(),
+    }
+
+
+def make_signed_receipt(payload: dict[str, Any]) -> str:
+    encoded = base64.urlsafe_b64encode(canonical_json(payload).encode("utf-8")).decode("ascii").rstrip("=")
+    secret = (_SIGNING_SECRET or "grant-local-development").encode("utf-8")
+    digest = hmac.new(secret, encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{encoded}.{digest}"
+
+
+def verify_signed_receipt(value: str) -> tuple[bool, dict[str, Any] | None]:
+    encoded, separator, digest = str(value or "").strip().partition(".")
+    if not separator or not encoded or not digest:
+        return False, None
+    secret = (_SIGNING_SECRET or "grant-local-development").encode("utf-8")
+    expected = hmac.new(secret, encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, digest):
+        return False, None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False, None
+    return (isinstance(payload, dict), payload if isinstance(payload, dict) else None)
+
+
 def new_code(bytes_count: int = 12) -> str:
     return secrets.token_urlsafe(bytes_count)
 
@@ -748,6 +943,182 @@ def rate_limited(request: Request) -> bool:
         bucket.append(now)
         _BUCKETS[host] = bucket
         return False
+
+
+def demo_rate_allowed(http_request: Request, bucket: str = "public") -> bool:
+    """Durable, privacy-preserving 20/hour gate for credential-less demo calls."""
+    hour_bucket = f"{bucket}:{int(time.time() // 3600)}"
+    identity = telemetry.ip_hash(http_request)
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT used FROM demo_rate_limits WHERE ip_hash = ? AND bucket = ?",
+            (identity, hour_bucket),
+        ).fetchone()
+        used = int(row["used"]) if row else 0
+        if used >= DEMO_LIMIT_PER_HOUR:
+            return False
+        if row:
+            conn.execute(
+                "UPDATE demo_rate_limits SET used = used + 1 WHERE ip_hash = ? AND bucket = ?",
+                (identity, hour_bucket),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO demo_rate_limits (ip_hash, bucket, used) VALUES (?, ?, 1)",
+                (identity, hour_bucket),
+            )
+        conn.execute("DELETE FROM demo_rate_limits WHERE bucket < ?", (f"{bucket}:{int(time.time() // 3600) - 2}",))
+    return True
+
+
+def public_call_allowed(http_request: Request, *, bucket: str, authorized: bool) -> bool:
+    """A live API key bypasses the demo limiter; anonymous calls do not."""
+    return True if authorized else demo_rate_allowed(http_request, bucket)
+
+
+def scope_amount(scope: dict[str, Any]) -> float | None:
+    for key in ("amount", "total", "value", "price", "spend", "max_amount"):
+        value = scope.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(re.sub(r"[^0-9.\-]", "", value))
+            except ValueError:
+                continue
+    return None
+
+
+def find_matching_rule(
+    org: str, agent: str, action: str, scope_json: str
+) -> sqlite3.Row | None:
+    """First active conditional rule that covers this exact agent/tool/scope."""
+    try:
+        scope = json.loads(scope_json or "{}")
+    except json.JSONDecodeError:
+        scope = {}
+    if not isinstance(scope, dict):
+        scope = {}
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM auto_approve_rules "
+            "WHERE org_id = ? AND status = 'active' AND "
+            "(revoked_at IS NULL OR revoked_at = '') AND "
+            "(expires_at IS NULL OR expires_at = '' OR expires_at >= ?) "
+            "ORDER BY created_at DESC",
+            (safe_org_id(org), iso()),
+        ).fetchall()
+    for row in rows:
+        rule_agent = str(row["agent_name"] or row["agent"] or "")
+        rule_action = str(row["tool_name"] or row["action"] or "")
+        if rule_agent and rule_agent != agent:
+            continue
+        if rule_action and rule_action != action:
+            continue
+        condition: dict[str, Any] = {}
+        raw_condition = str(row["condition_json"] or "")
+        if raw_condition:
+            try:
+                parsed = json.loads(raw_condition)
+                if isinstance(parsed, dict):
+                    condition = parsed
+            except json.JSONDecodeError:
+                continue
+        cap = row["max_amount"]
+        if cap is None:
+            cap = condition.get("max_amount")
+        if cap is not None:
+            amount = scope_amount(scope)
+            if amount is None or amount > float(cap):
+                continue
+        matched = True
+        for key, expected in condition.items():
+            if key == "max_amount":
+                continue
+            actual = scope.get(key)
+            if isinstance(expected, list):
+                if actual not in expected:
+                    matched = False
+                    break
+            elif actual != expected:
+                matched = False
+                break
+        if matched:
+            return row
+    return None
+
+
+def callback_payload(row: Any, decision: str) -> dict[str, Any]:
+    """Signed, minimal callback body. No raw scope values are included."""
+    permission_row = get_permission_by_request(str(row["id"]))
+    permission = permission_dict(permission_row) if permission_row else None
+    payload = receipt_payload(row, decision, permission)
+    keys = row.keys() if hasattr(row, "keys") else row
+    payload["signed_receipt"] = str(row["signed_receipt"] or "") if "signed_receipt" in keys else ""
+    payload["callback_url"] = ""
+    return payload
+
+
+def callback_signature(body: dict[str, Any], secret: str, timestamp: str) -> str:
+    material = f"{timestamp}.{canonical_json(body)}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), material, hashlib.sha256).hexdigest()
+
+
+def _post_callback(url: str, body: dict[str, Any], headers: dict[str, str]) -> int:
+    request = urlrequest.Request(
+        url,
+        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlrequest.build_opener().open(request, timeout=5) as response:
+            return int(getattr(response, "status", 0) or response.getcode())
+    except (urlerror.URLError, TimeoutError, OSError, ValueError):
+        return 0
+
+
+async def dispatch_callback(row: Any, decision: str) -> bool:
+    """POST a signed decision receipt, retrying up to twice on failure."""
+    keys = row.keys() if hasattr(row, "keys") else row
+    callback_url = str(row["callback_url"] or "") if "callback_url" in keys else ""
+    secret = str(row["callback_secret"] or "") if "callback_secret" in keys else ""
+    receipt = str(row["signed_receipt"] or "") if "signed_receipt" in keys else ""
+    with closing(db()) as conn:
+        stored = conn.execute(
+            "SELECT callback_url, callback_secret, signed_receipt FROM approval_requests WHERE id = ?",
+            (str(row["id"]),),
+        ).fetchone()
+    if stored:
+        callback_url = str(stored["callback_url"] or callback_url)
+        secret = str(stored["callback_secret"] or secret)
+        receipt = str(stored["signed_receipt"] or receipt)
+    if not callback_url:
+        return False
+    secret = secret or (_SIGNING_SECRET or "grant-local-development")
+    parts = urlsplit(callback_url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return False
+    if IS_PRODUCTION and parts.scheme != "https":
+        return False
+    body = callback_payload(row, decision)
+    body["signed_receipt"] = receipt or body["signed_receipt"]
+    timestamp = iso()
+    headers = {
+        "content-type": "application/json",
+        "x-grant-timestamp": timestamp,
+        "x-grant-signature": "sha256=" + callback_signature(body, secret, timestamp),
+        "x-grant-request-id": str(row["id"])[:120],
+    }
+    for attempt in range(CALLBACK_MAX_RETRIES + 1):
+        if attempt:
+            await asyncio.sleep(0.1 * attempt)
+        status = await asyncio.to_thread(_post_callback, callback_url, body, headers)
+        if 200 <= status < 300:
+            return True
+    return False
 
 
 def get_request_by_token(token: str) -> sqlite3.Row | None:
@@ -935,6 +1306,83 @@ def org_for_billing_email(email: str) -> str:
     return str(row["org_id"]) if row else ""
 
 
+def org_for_checkout_email(email: str) -> str:
+    """Resolve a Cashfree payer email to a workspace or user-owned org.
+
+    The email is normalized in memory and never returned in an API response.
+    """
+    normalized = normalize_billing_email(email)
+    if not normalized:
+        return ""
+    existing = org_for_billing_email(normalized)
+    if existing:
+        return existing
+    with closing(db()) as conn:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (normalized,)).fetchone()
+        if user:
+            org = conn.execute(
+                "SELECT id FROM organizations WHERE owner_user_id = ? ORDER BY created_at LIMIT 1",
+                (user["id"],),
+            ).fetchone()
+            if org:
+                return str(org["id"])
+    return ""
+
+
+def sync_user_plan(
+    conn: Any, org: str, tier: str, status: str, action: dict[str, str] | None = None
+) -> None:
+    """Mirror a paid plan flip onto the durable user record for /account."""
+    action = action or {}
+    normalized = normalize_billing_email(str(action.get("email") or ""))
+    user_row = None
+    if normalized:
+        user_row = conn.execute("SELECT * FROM users WHERE email = ?", (normalized,)).fetchone()
+    if not user_row:
+        org_row = conn.execute(
+            "SELECT owner_user_id FROM organizations WHERE id = ?", (safe_org_id(org),)
+        ).fetchone()
+        owner = str(org_row["owner_user_id"] or "") if org_row else ""
+        if owner:
+            user_row = conn.execute("SELECT * FROM users WHERE id = ?", (owner,)).fetchone()
+    if not user_row and normalized:
+        user = find_or_create_user(conn, normalized)
+        user_row = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not user_row:
+        return
+    selected = plans.tier(tier)
+    active_paid = status == "active" and tier in billing.PAID_TIERS
+    quota = selected.approvals_per_month if selected.approvals_per_month is not None else 0
+    expiry = str(action.get("plan_expires_at") or "")
+    if not expiry and active_paid:
+        expiry = plans.iso(plans.utcnow() + timedelta(days=PAID_PLAN_GRACE_DAYS))
+    conn.execute(
+        "UPDATE users SET plan_tier = ?, monthly_quota = ?, approvals_used = ?, "
+        "plan_expires_at = ? WHERE id = ?",
+        (
+            tier if active_paid else "free",
+            quota if active_paid else int(row_value(user_row, "monthly_quota", 1000)),
+            0 if active_paid else int(row_value(user_row, "approvals_used", 0)),
+            expiry if active_paid else "",
+            user_row["id"],
+        ),
+    )
+    if normalized:
+        conn.execute(
+            "INSERT INTO billing_contacts (org_id, email, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(org_id) DO UPDATE SET email = excluded.email, updated_at = excluded.updated_at",
+            (safe_org_id(org), normalized, iso()),
+        )
+
+
+def row_value(row: Any, key: str, default: Any) -> Any:
+    keys = row.keys() if hasattr(row, "keys") else row
+    if key not in keys:
+        return default
+    value = row[key]
+    return default if value is None else value
+
+
 def sanitize_payment_ref(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "", str(value or ""))[:120]
 
@@ -946,16 +1394,23 @@ def record_unclaimed_payment(receipt: dict[str, str]) -> bool:
     tier = str(receipt.get("tier") or "").strip().lower()
     if not event_id or not email or tier not in billing.PAID_TIERS:
         return False
+    payment_ref = sanitize_payment_ref(receipt.get("payment_ref"))
     with transaction() as conn:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO unclaimed_payments "
-            "(event_id, payment_ref, email, tier, paid_at, status, workspace, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'unclaimed', '', ?)",
+            "(event_id, id, payment_ref, cf_payment_id, customer_email, email, tier, plan_tier, "
+            "amount, paid_at, status, workspace, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unclaimed', '', ?)",
             (
                 event_id,
-                sanitize_payment_ref(receipt.get("payment_ref")),
+                event_id,
+                payment_ref,
+                payment_ref or None,
+                email,
                 email,
                 tier,
+                tier,
+                str(receipt.get("amount") or "")[:40] or None,
                 str(receipt.get("paid_at") or "")[:40],
                 iso(),
             ),
@@ -1009,21 +1464,27 @@ def claim_unclaimed_payment(org_id: str, claim: str) -> bool:
         if email:
             row = conn.execute(
                 "SELECT * FROM unclaimed_payments "
-                "WHERE status = 'unclaimed' AND email = ? ORDER BY created_at DESC LIMIT 1",
-                (email,),
+                "WHERE status = 'unclaimed' AND "
+                "(customer_email = ? OR email = ?) ORDER BY created_at DESC LIMIT 1",
+                (email, email),
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT * FROM unclaimed_payments "
-                "WHERE status = 'unclaimed' AND payment_ref = ? ORDER BY created_at DESC LIMIT 1",
-                (payment_ref,),
+                "WHERE status = 'unclaimed' AND "
+                "(cf_payment_id = ? OR payment_ref = ?) ORDER BY created_at DESC LIMIT 1",
+                (payment_ref, payment_ref),
             ).fetchone()
         if not row:
             return False
+        owner = conn.execute(
+            "SELECT owner_user_id FROM organizations WHERE id = ?", (org,)
+        ).fetchone()
+        claimed_by = str(owner["owner_user_id"] or "") if owner else ""
         cursor = conn.execute(
-            "UPDATE unclaimed_payments SET status = 'claimed', workspace = ?, claimed_at = ? "
-            "WHERE event_id = ? AND status = 'unclaimed'",
-            (org, iso(), row["event_id"]),
+            "UPDATE unclaimed_payments SET status = 'claimed', workspace = ?, claimed_at = ?, "
+            "claimed_by_user_id = ? WHERE event_id = ? AND status = 'unclaimed'",
+            (org, iso(), claimed_by or None, row["event_id"]),
         )
         if cursor.rowcount != 1:
             return False
@@ -1120,6 +1581,7 @@ def upgrade_detail(
 ) -> dict[str, Any]:
     return {
         "code": "plan_upgrade_required" if status == 403 else "approval_quota_exceeded",
+        "error": "upgrade_required" if status == 403 else "quota_exceeded",
         "message": message,
         "feature": feature,
         "current_tier": current,
@@ -1215,6 +1677,7 @@ def apply_billing_event(action: dict[str, str]) -> bool:
         insert_plan(conn, plan)
         update_plan(conn, plan)
         sync_org_tier(conn, org, plans.effective_tier(plan))
+        sync_user_plan(conn, org, tier, status, action)
         if active_paid:
             reset_current_quota(conn, org)
             schedule_renewal_reminder(conn, action, org, now)
@@ -1653,8 +2116,9 @@ def create_request(payload: RequestIn, *, gateway_hash: str = "") -> dict[str, s
             """
             INSERT INTO approval_requests (
                 id, org_id, token, agent, action, summary, scope_json, scope_hash, requester,
-                channel, gateway_hash, created_at, expires_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                channel, gateway_hash, created_at, expires_at, status,
+                owner_user_id, agent_name, tool_name, callback_url, callback_secret
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
@@ -1670,6 +2134,11 @@ def create_request(payload: RequestIn, *, gateway_hash: str = "") -> dict[str, s
                 str(gateway_hash or "")[:120],
                 now,
                 expires,
+                str(payload.owner_user_id or "")[:120],
+                payload.agent.strip()[:120],
+                payload.action.strip()[:120],
+                payload.callback_url.strip()[:500],
+                payload.callback_secret.strip()[:200],
             ),
         )
     record_usage(org, request_id)
@@ -1694,6 +2163,7 @@ def decide_request(row: sqlite3.Row, decision: str) -> bool:
         expires = iso_plus(30 * 24 * 60)
     else:
         expires = iso_plus(60)
+    permission: dict[str, Any] | None = None
     with transaction() as conn:
         updated = conn.execute(
             "UPDATE requests SET status = 'decided', decision = ?, decision_at = ?, policy = ? "
@@ -1702,11 +2172,6 @@ def decide_request(row: sqlite3.Row, decision: str) -> bool:
         )
         if updated.rowcount != 1:
             return False
-        conn.execute(
-            "UPDATE approval_requests SET status = 'decided', decision = ?, decision_at = ?, "
-            "policy = ? WHERE id = ?",
-            (decision, now, decision, row["id"]),
-        )
         if decision in {"approve", "auto_rule", "always"}:
             permission = {
                 "id": "perm_" + new_code(9),
@@ -1739,6 +2204,22 @@ def decide_request(row: sqlite3.Row, decision: str) -> bool:
                     sign_permission(permission),
                 ),
             )
+        receipt = make_signed_receipt(receipt_payload(row, decision, permission))
+        public_status = "approved" if decision in {"approve", "auto_rule", "always"} else "cancelled"
+        conn.execute(
+            "UPDATE approval_requests SET status = ?, decision = ?, decision_at = ?, "
+            "decided_at = ?, policy = ?, decision_type = ?, signed_receipt = ? WHERE id = ?",
+            (
+                public_status,
+                decision,
+                now,
+                now,
+                decision,
+                receipt_payload(row, decision, permission)["decision_type"],
+                receipt if permission else "",
+                row["id"],
+            ),
+        )
     return True
 
 
@@ -1756,16 +2237,16 @@ def risk_for(action: str, scope_json: str) -> str:
 
 
 CSS = """
-:root{color-scheme:light;--paper:#f3ede3;--paper-deep:#e7ddd0;--ink:#2b1b20;--burgundy:#6d2038;--burgundy-2:#8c3a55;--muted:#7d6b69;--line:rgba(109,32,56,.16);--glass:rgba(255,255,255,.58);--glass-2:rgba(255,255,255,.30);--shadow:0 26px 70px rgba(79,41,52,.14)}
+:root{color-scheme:light;--paper:#FAF8F5;--paper-deep:#F2EFE8;--ink:#2b1b20;--burgundy:#6d2038;--burgundy-2:#8c3a55;--muted:#7d6b69;--line:#E6E1D6;--glass:rgba(255,255,255,.72);--glass-2:rgba(255,255,255,.48);--shadow:0 18px 44px rgba(79,41,52,.08)}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
-body{margin:0;min-height:100vh;background:linear-gradient(155deg,#f7f2ea 0%,#efe7dc 48%,#e8ded2 100%);color:var(--ink);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:-.005em}
+body{margin:0;min-height:100vh;background:var(--paper);color:var(--ink);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:-.005em}
 .circuit{position:fixed;inset:0;width:100%;height:100%;color:rgba(109,32,56,.085);pointer-events:none;z-index:0}
 .trace-flow{stroke-dasharray:7 11;animation:trace 18s linear infinite}
 @keyframes trace{to{stroke-dashoffset:-180}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.trace-flow{animation:none}.btn{transition:none}}
 .wrap{position:relative;z-index:1;max-width:1120px;margin:0 auto;padding:22px 20px 90px}
-.glass{background:linear-gradient(135deg,var(--glass),var(--glass-2));backdrop-filter:blur(20px) saturate(135%);-webkit-backdrop-filter:blur(20px) saturate(135%);border:1px solid rgba(255,255,255,.78);border-radius:26px;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.92)}
+.glass{background:linear-gradient(135deg,var(--glass),var(--glass-2));backdrop-filter:blur(20px) saturate(135%);-webkit-backdrop-filter:blur(20px) saturate(135%);border:1px solid var(--line);border-radius:26px;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.92)}
 .top{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin-bottom:54px;padding:12px 16px;border-radius:20px}
 .brand{display:flex;align-items:center;gap:11px;font-weight:800;letter-spacing:.16em;font-size:.92rem;text-transform:uppercase;color:var(--ink);text-decoration:none}
 .mark{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,var(--burgundy),var(--burgundy-2));color:#fff8f2;display:grid;place-items:center;font-family:ui-serif,Georgia,serif;font-size:1rem;font-weight:700;box-shadow:0 8px 22px rgba(109,32,56,.2)}
@@ -1886,6 +2367,38 @@ html[data-grant-compact="true"] .btn{width:100%}
 .toast.show{opacity:1}
 @media(max-width:900px){.tier-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.wrap{padding:16px 13px 60px}.top{margin-bottom:28px;padding:10px 12px}.nav{gap:13px}.hero{padding:38px 24px}.preview,.section,.approval,.done{padding:24px 20px}.mock{grid-template-columns:1fr}.kv{grid-template-columns:1fr}.btn{width:100%}.cta .btn{width:auto}.tier-grid{grid-template-columns:1fr}.receipt-paths{grid-template-columns:1fr}.tier{min-height:0}.meter{align-items:flex-start}.meter-track{width:100%;flex:none}.drawer{position:fixed;inset:auto 10px 10px 10px;z-index:6;max-height:70vh;overflow:auto;box-shadow:var(--shadow)}html[data-grant-compact="true"] .approval{padding:20px 16px}}
+.checkpoint,.intro,.receipt-cert,.account-app{max-width:860px;margin:0 auto;padding:34px 38px}
+.checkpoint h1,.intro h1,.receipt-cert h1{font-size:2.25rem;margin:18px 0 8px}
+.checkpoint .lede.left,.intro .lede.left{text-align:left}
+.checkpoint-actions{display:flex;gap:10px;flex-wrap:wrap;margin:24px 0 8px}
+.checkpoint-actions .btn{min-width:150px}
+.subtle-link{display:inline-block;margin:8px 0;font-size:.88rem;color:var(--muted);text-decoration:underline;text-underline-offset:3px}
+.cancel-link{border:0;background:none;color:var(--muted);font-size:.82rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer;padding:8px 0}
+.countdown{font-weight:700;color:var(--burgundy)}
+.zero-note{padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.55);color:var(--muted);font-size:.9rem;margin:16px 0}
+.confirm-flash{position:fixed;inset:0;display:grid;place-items:center;background:rgba(250,248,245,.92);color:var(--burgundy);font-family:ui-serif,Georgia,serif;font-size:1.6rem;z-index:20;opacity:0;pointer-events:none;transition:opacity .2s}
+.confirm-flash.show{opacity:1}
+.intro-step{padding:20px 0;border-bottom:1px solid var(--line)}
+.intro-step:last-child{border-bottom:0}
+.intro-step .step-num{font-family:ui-serif,Georgia,serif;color:var(--burgundy);font-size:1.1rem}
+.plan-mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:14px}
+.plan-mini div{padding:10px;border:1px solid var(--line);border-radius:12px;font-size:.78rem;color:var(--muted)}
+.plan-mini strong{display:block;color:var(--ink);font-size:.9rem}
+.install-card{padding:18px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.6);margin-top:14px}
+.install-card ol{margin:10px 0 16px;padding-left:20px;color:var(--muted)}
+.badge-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0}
+.badge.ok{background:rgba(45,95,72,.1);color:#2d5f48;font-size:.74rem;padding:4px 10px;border-radius:99px;font-weight:800}
+.scope-fingerprint{font-size:.8rem;color:var(--muted);word-break:break-all}
+.receipt-cta{margin-top:24px;padding:18px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.5)}
+.account-app{max-width:1080px}
+.account-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.account-grid .section,.checkpoint .section{padding:24px}
+.form-row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.form-row .field{flex:1;min-width:180px}
+.kill-row{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.kill-row:last-child{border-bottom:0}
+.key-once{padding:14px;border:1px solid var(--line);border-radius:14px;background:#fff;word-break:break-all}
+@media(max-width:700px){.plan-mini{grid-template-columns:repeat(2,minmax(0,1fr))}.account-grid{grid-template-columns:1fr}.checkpoint,.intro,.receipt-cert,.account-app{padding:22px 18px}}
 """
 
 CIRCUIT = """
@@ -1932,7 +2445,33 @@ function grantSetCycle(cycle){
     link.href = url.toString();
   });
 }
+var grantDeferredPrompt = null;
+window.addEventListener('beforeinstallprompt', function(event){
+  event.preventDefault();
+  grantDeferredPrompt = event;
+  document.querySelectorAll('[data-grant-install]').forEach(function(button){button.hidden = false;});
+});
+window.addEventListener('appinstalled', function(){grantDeferredPrompt = null;});
+async function grantInstallShortcut(stay){
+  if(grantDeferredPrompt){
+    grantDeferredPrompt.prompt();
+    try{await grantDeferredPrompt.userChoice;}catch(error){}
+    grantDeferredPrompt = null;
+  }
+  try{localStorage.setItem('grant-shortcut-added', '1');}catch(error){}
+  if(stay){
+    document.querySelectorAll('[data-grant-install-enable]').forEach(function(node){node.disabled = false;});
+    var status = document.getElementById('grant-install-status');
+    if(status){status.textContent = 'Shortcut added. Continue to your account.';}
+    return;
+  }
+  location.href = '/account';
+}
 document.addEventListener('DOMContentLoaded', function(){
+  if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){});}
+  document.querySelectorAll('[data-grant-install]').forEach(function(button){
+    button.addEventListener('click', function(){grantInstallShortcut(this.dataset.grantInstallStay === '1');});
+  });
   document.querySelectorAll('[data-grant-nudge-trigger="always"]').forEach(function(node){
     node.addEventListener('mouseenter', function(){grantOpenDrawer('grant-drawer-auto');});
     node.addEventListener('focus', function(){grantOpenDrawer('grant-drawer-auto');});
@@ -1995,13 +2534,14 @@ def page(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title>
 <meta name="description" content="{html.escape(description, quote=True)}">
-<meta name="theme-color" content="#f3ede3">
+<meta name="theme-color" content="#FAF8F5">
+<link rel="manifest" href="/manifest.webmanifest">
 <meta property="og:title" content="{html.escape(title, quote=True)}">
 <meta property="og:description" content="{html.escape(description, quote=True)}">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 {favicon}{canonical}{robots}<style>{CSS}</style></head>
-<body>{CIRCUIT}<div class="wrap">{body}<div class="footer">Grant · simple approvals for AI agents · <a href="/docs">How it works</a> · <a href="/stats">Activity</a></div></div>
+<body>{CIRCUIT}<div class="wrap">{body}<div class="footer">Grant never sees your credentials or payment details. It only records what you allowed. · <a href="/docs">How it works</a> · <a href="/stats">Activity</a></div></div>
 <div class="toast" id="toast">Copied</div>{SCRIPT}<script src="/grant-popup.js"></script></body></html>"""
 
 
@@ -2281,7 +2821,7 @@ def approval_page(
     {guardrail_drawer("approver", workspace)}
   </details>
   {account_panel}
-  <p class="alert">Grant never sees your passwords or payment details. It only records what you allowed. <a href="{protected_url}">Protected by Grant</a></p>
+  <p class="alert">Grant never sees your credentials or payment details. It only records what you allowed. <a href="{protected_url}">Protected by Grant</a></p>
   <p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p>
 </section>
 """
@@ -2418,10 +2958,27 @@ def find_or_create_user(conn: Any, email: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM users WHERE email = ?", (normalized,)).fetchone()
     if row:
         return dict(row)
-    user = {"id": "usr_" + new_code(12), "email": normalized, "created_at": iso()}
+    user = {
+        "id": "usr_" + new_code(12),
+        "email": normalized,
+        "created_at": iso(),
+        "plan_tier": "free",
+        "monthly_quota": 1000,
+        "approvals_used": 0,
+        "plan_expires_at": "",
+    }
     conn.execute(
-        "INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)",
-        (user["id"], user["email"], user["created_at"]),
+        "INSERT INTO users (id, email, created_at, plan_tier, monthly_quota, approvals_used, "
+        "plan_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            user["id"],
+            user["email"],
+            user["created_at"],
+            user["plan_tier"],
+            user["monthly_quota"],
+            user["approvals_used"],
+            user["plan_expires_at"],
+        ),
     )
     return user
 
@@ -2607,7 +3164,16 @@ def signin_page(next_path: str = "/pricing", error: bool = False) -> str:
       <div class="decision"><button class="btn mini" type="submit">Email me a sign-in link</button></div>
     </form>
   </details>
-  <p class="alert">Grant does not use passwords. Your workspace link stays private; email links work once.</p>
+  <details class="claim">
+    <summary>Or use a one-time code</summary>
+    <form method="post" action="/v1/auth/otp" class="stack-form">
+      <input type="hidden" name="next" value="{target}">
+      <label for="otp-email">Email address</label>
+      <input class="field" id="otp-email" type="email" name="email" maxlength="254" placeholder="you@example.com" required>
+      <div class="decision"><button class="btn mini" type="submit">Email me a code</button></div>
+    </form>
+  </details>
+  <p class="alert">Grant does not use passwords. Your workspace link stays private; email links and codes work once.</p>
 </section>
 """
     return page("Sign in — Grant", body, "Sign in to your Grant workspace.", private=True)
@@ -3133,6 +3699,333 @@ def login_history_page() -> str:
     return page("Login history", body, "Token-gated login and pop-up history for Grant.", private=True)
 
 
+SIGNUP_SCRIPT = """
+<script>
+(function(){
+  var stored = false;
+  try{stored = localStorage.getItem('grant-shortcut-added') === '1';}catch(error){}
+  if(stored){
+    document.querySelectorAll('[data-grant-install-enable]').forEach(function(node){node.disabled = false;});
+    var status = document.getElementById('grant-install-status');
+    if(status){status.textContent = 'Shortcut added. Continue to your account.';}
+  }
+})();
+</script>
+"""
+
+
+def checkpoint_page(row: Any) -> str:
+    """Pop-Up 1: the quiet Continue / Always allow / Cancel checkpoint."""
+    request_id = clean(str(row["id"] or ""), 120)
+    agent = clean(row["agent"], 120)
+    tool = clean(row["action"], 120)
+    scope_hash = clean(row["scope_hash"], 64)
+    expires = friendly_expiry(row["expires_at"])
+    body = header() + f"""
+<section class="checkpoint glass">
+  <span class="eyebrow"><span class="dot"></span> Grant checkpoint</span>
+  <h1>Let {tool} continue?</h1>
+  <p class="lede left">{agent} is asking for one scoped action. Grant records the decision; it never sees credentials or payment details.</p>
+  <dl class="kv">
+    <dt>Agent</dt><dd>{agent}</dd>
+    <dt>Action</dt><dd>{tool}</dd>
+    <dt>Scope fingerprint</dt><dd class="scope-fingerprint">{scope_hash}</dd>
+    <dt>Window</dt><dd>{expires}</dd>
+  </dl>
+  <form method="post" action="/approve/{request_id}/decide" class="checkpoint-actions">
+    <button class="btn" name="decision" value="approve" type="submit">Continue</button>
+    <button class="btn ghost" name="decision" value="always" type="submit">Always allow</button>
+  </form>
+  <form method="post" action="/approve/{request_id}/decide">
+    <button class="cancel-link" name="decision" value="reject" type="submit">Cancel</button>
+  </form>
+  <p class="zero-note">Grant never sees your credentials or payment details. It only records what you allowed.</p>
+  <p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p>
+</section>
+"""
+    return page(
+        "Grant checkpoint", body, "A quiet, one-tap human checkpoint for an AI agent action.", private=True
+    )
+
+
+def signup_page(next_path: str = "/account", error: bool = False) -> str:
+    """Pop-Up 2: sign-up requires adding the Grant shortcut before continuing."""
+    target = clean(safe_next_path(next_path or "/account"), 200)
+    message = (
+        '<p class="banner warn">Add the Grant shortcut first. This step is required so your next checkpoint is one tap away.</p>'
+        if error
+        else ""
+    )
+    body = header() + f"""
+<section class="intro glass">
+  <span class="eyebrow"><span class="dot"></span> Welcome to Grant</span>
+  <h1>Keep the checkpoint<br><em>one tap away.</em></h1>
+  <p class="lede left">Grant gives your agents a human decision without ever holding credentials or money. Three quiet steps, then you are in.</p>
+  {message}
+  <div class="intro-step"><span class="step-num">01</span> <strong>Save your account.</strong> Use an email link or a one-time code. No passwords, no card needed.</div>
+  <div class="intro-step">
+    <span class="step-num">02</span> <strong>Add Shortcut.</strong> Install Grant as an app so the next approval opens like a native window.
+    <div class="install-card">
+      <button class="btn" type="button" data-grant-install data-grant-install-stay="1">Add Shortcut</button>
+      <p class="sub" id="grant-install-status">Required before continuing.</p>
+      <ol><li>Use your browser's Add to Home Screen / Install app action if a prompt does not appear.</li><li>Return here and continue.</li></ol>
+    </div>
+  </div>
+  <div class="intro-step"><span class="step-num">03</span> <strong>Open your account.</strong> Plan, usage, rules, receipts, and keys live in one standalone space.</div>
+  <form method="post" action="/signup" class="stack-form">
+    <input type="hidden" name="installed" value="1">
+    <input type="hidden" name="next" value="{target}">
+    <label for="signup-email">Email address</label>
+    <input class="field" id="signup-email" type="email" name="email" maxlength="254" placeholder="you@example.com">
+    <div class="decision"><button class="btn" type="submit" data-grant-install-enable disabled>Continue to account</button></div>
+  </form>
+  <details class="claim" style="margin-top:16px">
+    <summary>Prefer a one-time code?</summary>
+    <form method="post" action="/v1/auth/otp" class="form-row">
+      <input type="hidden" name="next" value="{target}">
+      <input type="email" name="email" maxlength="254" placeholder="you@example.com" required>
+      <button class="btn mini" type="submit">Email me a code</button>
+    </form>
+  </details>
+  <p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p>
+</section>
+""" + SIGNUP_SCRIPT
+    return page("Set up Grant", body, "Create your Grant account and add the standalone shortcut.", private=True)
+
+
+def receipt_page(row: Any, verified: bool, payload: dict[str, Any] | None) -> str:
+    """Public, signed Magic Receipt: no raw scope values, no PII, no secrets."""
+    payload = payload or {}
+    request_id = clean(payload.get("request_id") or row["id"], 120)
+    status = clean(payload.get("status") or row["status"], 20)
+    decision_type = clean(payload.get("decision_type") or row["decision"] or "recorded", 40)
+    agent = clean(payload.get("agent_name") or row["agent"], 120)
+    tool = clean(payload.get("tool_name") or row["action"], 120)
+    scope_hash = clean(payload.get("scope_hash") or row["scope_hash"], 64)
+    permission_id = clean(payload.get("permission_id") or "", 120) or "—"
+    decided_at = clean(payload.get("decided_at") or row["decision_at"] or "", 40) or "recorded"
+    receipt = str(row["signed_receipt"] or "") if "signed_receipt" in (row.keys() if hasattr(row, "keys") else row) else ""
+    seal = "✓" if status == "approved" else "×"
+    badge = "badge ok" if verified else "badge"
+    proof = clean(receipt[:160] + ("…" if len(receipt) > 160 else ""), 200) or "Legacy receipt · signature verified from permission ledger"
+    body = header() + f"""
+<section class="receipt-cert glass">
+  <span class="eyebrow"><span class="dot"></span> Magic Receipt</span>
+  <div class="seal">{seal}</div>
+  <h1>{status.title()} · {decision_type.replace('_', ' ').title()}</h1>
+  <p class="lede left">Grant recorded this decision with an HMAC-SHA256 receipt. It holds no credentials, no payment details, and no raw scope values.</p>
+  <p class="badge-row"><span class="{badge}">{'Signature verified' if verified else 'Signature unavailable'}</span><span class="eyebrow">Zero custody</span></p>
+  <dl class="kv">
+    <dt>Request</dt><dd class="mono">{request_id}</dd>
+    <dt>Agent</dt><dd>{agent}</dd>
+    <dt>Action</dt><dd>{tool}</dd>
+    <dt>Scope fingerprint</dt><dd class="scope-fingerprint">{scope_hash}</dd>
+    <dt>Permission</dt><dd class="mono">{permission_id}</dd>
+    <dt>Recorded</dt><dd>{decided_at}</dd>
+  </dl>
+  <p class="sub">Receipt proof: <code class="scope-fingerprint">{proof}</code></p>
+  <div class="receipt-cta">
+    <p>Want every AI agent you have authorized in one quiet place?</p>
+    <a class="btn" href="/account">Open Your Grant Account →</a>
+    <a class="btn ghost" href="/start?from=receipt">Get Your Free API Key →</a>
+  </div>
+  <p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p>
+</section>
+"""
+    return page("Grant receipt", body, "A signed, privacy-preserving receipt for one agent decision.", private=True)
+
+
+def mcp_setup_page() -> str:
+    base = PUBLIC_BASE_URL or "https://grant-approve.vercel.app"
+    snippet = (
+        "curl " + base + "/api/mcp \\\n"
+        '  -H "Authorization: Bearer gr_live_..." \\\n'
+        '  -H "Content-Type: application/json" \\\n'
+        "  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}'"
+    )
+    body = header() + f"""
+<section class="section glass">
+  <span class="eyebrow"><span class="dot"></span> Grant MCP</span>
+  <h1>One endpoint. No wrapper.</h1>
+  <p class="sub">Point any MCP client at <code>{html.escape(base, quote=True)}/api/mcp</code>. Send JSON-RPC over POST with a <code>gr_live_</code> Bearer key, or use the 20-per-hour demo mode without a key.</p>
+  <pre><code>{html.escape(snippet, quote=True)}</code></pre>
+  <p class="sub">Methods: <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>. The machine-readable contract lives at <a href="/openapi.json">/openapi.json</a>.</p>
+</section>
+"""
+    return page("Grant MCP setup", body, "Connect an MCP client directly to Grant.", private=True)
+
+
+def account_page(
+    http_request: Request,
+    principal: dict[str, Any] | None,
+    *,
+    raw_key: str = "",
+    claim: str = "",
+) -> str:
+    """The standalone /account app: plan, controls, history, and integrations."""
+    user: dict[str, Any] | None = None
+    org = str(principal.get("org_id") or "") if principal else ""
+    context: dict[str, Any] | None = None
+    rules: list[Any] = []
+    keys: list[Any] = []
+    audit: list[Any] = []
+    if principal:
+        with closing(db()) as conn:
+            user_row = conn.execute(
+                "SELECT * FROM users WHERE id = ?", (principal.get("user_id") or "",)
+            ).fetchone()
+            user = dict(user_row) if user_row else None
+            rules = conn.execute(
+                "SELECT * FROM auto_approve_rules WHERE org_id = ? OR user_id = ? "
+                "ORDER BY created_at DESC LIMIT 30",
+                (org, principal.get("user_id") or ""),
+            ).fetchall()
+            keys = conn.execute(
+                "SELECT * FROM api_keys WHERE org_id = ? ORDER BY created_at DESC LIMIT 30", (org,)
+            ).fetchall()
+            audit = conn.execute(
+                "SELECT * FROM approval_requests WHERE org_id = ? OR owner_user_id = ? "
+                "ORDER BY created_at DESC LIMIT 30",
+                (org, principal.get("user_id") or ""),
+            ).fetchall()
+        context = plan_context(org)
+    history = login_library.report(limit=10)
+    base = PUBLIC_BASE_URL or str(http_request.base_url).rstrip("/")
+    profile_value = emailer.mask_email(str(user["email"] or "")) if user and user.get("email") else "Not signed in"
+    account_state = "Connected" if principal else "Sign in required"
+    tier_value = plans.effective_tier(context["plan"]) if context else "free"
+    usage_html = usage_meter_html(context) if context else '<div class="meter"><span class="label">Sign in to see your monthly usage.</span></div>'
+    cashfree_plus = cashfree.MONTHLY_FORM_URLS["plus"]
+    cashfree_pro = cashfree.MONTHLY_FORM_URLS["pro"]
+    enterprise = billing.enterprise_contact_url(org) or "/pricing#enterprise"
+    rule_rows = []
+    for row in rules:
+        rule_id = clean(row["id"], 120)
+        cap = row_value(row, "max_amount", None)
+        cap_label = f"${float(cap):,.2f}" if cap is not None else "No spend cap"
+        condition = str(row_value(row, "condition_json", "") or "")
+        scope_label = clean(condition[:80] or "Any scoped action", 100)
+        rule_rows.append(
+            f'<div class="kill-row"><div><strong>{clean(row["agent"], 80)} → {clean(row["action"], 80)}</strong>'
+            f'<div class="sub">{scope_label} · {cap_label}</div></div><div class="actions">'
+            f'<form method="post" action="/account/rules/{rule_id}/cap" class="form-row">'
+            f'<input type="number" name="max_amount" min="0" step="0.01" value="{html.escape(str(cap or ""), quote=True)}" placeholder="Spend cap" aria-label="Spend cap">'
+            f'<button class="btn ghost mini" type="submit">Save cap</button></form>'
+            f'<form method="post" action="/account/rules/{rule_id}/revoke">'
+            f'<button class="btn ghost mini" type="submit">Kill switch</button></form></div></div>'
+        )
+    rule_html = "".join(rule_rows) or '<p class="sub">No auto-approve rules yet. Rules created from an approval are listed here.</p>'
+    key_rows = "".join(
+        f'<p class="sub"><code>{clean(row["key_prefix"])}</code> {clean(row["name"], 60)} '
+        f'<form method="post" action="/api/keys/{clean(row["id"], 120)}/revoke" style="display:inline">'
+        f'<button class="btn ghost mini" type="submit">Revoke</button></form></p>'
+        for row in keys
+        if not row["revoked_at"]
+    ) or '<p class="sub">No live API keys yet.</p>'
+    audit_rows = "".join(
+        f'<tr><td class="mono">{clean(row["id"])}</td><td>{clean(row_value(row, "agent_name", row["agent"]), 80)}</td>'
+        f'<td>{clean(row_value(row, "tool_name", row["action"]), 80)}</td><td>{clean(row["status"], 20)}</td>'
+        f'<td>{clean(row["decision"] or "—", 20)}</td></tr>'
+        for row in audit
+    ) or '<tr><td colspan="5">No approvals recorded yet.</td></tr>'
+    login_rows = "".join(
+        f'<tr><td>{clean(item["created_at"], 40)}</td><td>{clean(item["source"], 30)}</td><td>{clean(item["device"], 60)}</td></tr>'
+        for item in history["login_history"]
+    ) or '<tr><td colspan="3">No logins recorded yet.</td></tr>'
+    popup_rows = "".join(
+        f'<tr><td>{clean(item["opened_at"], 40)}</td><td>{clean(item["channel"], 30)}</td>'
+        f'<td>{clean(item["device"], 60)}</td><td>{clean(item["decision"], 20)}</td></tr>'
+        for item in history["popup_history"]
+    ) or '<tr><td colspan="4">No pop-ups recorded yet.</td></tr>'
+    new_key_html = (
+        f'<div class="key-once"><strong>Save this key now.</strong><br><code>{html.escape(raw_key, quote=True)}</code></div>'
+        if raw_key
+        else ""
+    )
+    claim_note = (
+        '<p class="banner">Payment claimed and plan activated.</p>' if claim == "ok" else
+        ('<p class="banner warn">No unclaimed payment matched that email or payment ID.</p>' if claim == "missing" else "")
+    )
+    signin_form = "" if principal else """
+<section class="section glass">
+  <h2>Sign in to see your private account</h2>
+  <p class="sub">Use a magic link or one-time code. Grant does not use passwords.</p>
+  <form method="post" action="/v1/auth/magic-link" class="form-row">
+    <input type="hidden" name="next" value="/account">
+    <input type="email" name="email" maxlength="254" placeholder="you@example.com" required>
+    <button class="btn mini" type="submit">Send sign-in link</button>
+  </form>
+  <form method="post" action="/v1/auth/otp" class="form-row">
+    <input type="hidden" name="next" value="/account">
+    <input type="email" name="email" maxlength="254" placeholder="you@example.com" required>
+    <button class="btn ghost mini" type="submit">Email a code</button>
+  </form>
+</section>
+"""
+    body = header() + f"""
+<section class="account-app">
+  <span class="eyebrow"><span class="dot"></span> Grant account · {clean(account_state, 30)}</span>
+  <h1>Your quiet control room.</h1>
+  <p class="sub">Profile, plan, rules, receipts, and integrations. No credential custody. No clutter.</p>
+  {signin_form}
+  {claim_note}
+  {new_key_html}
+  <div class="account-grid">
+    <section class="section glass"><h2>Profile & plan</h2>
+      <dl class="kv"><dt>Account</dt><dd>{clean(profile_value, 100)}</dd>
+      <dt>Workspace</dt><dd class="mono">{clean(org or '—', 60)}</dd>
+      <dt>Plan</dt><dd>{clean(tier_value, 20)}</dd>
+      <dt>Trial</dt><dd>{int(context['usage']['trial_days_left']) if context else 0} days left</dd></dl>
+      {usage_html}
+      <p class="sub">Monthly approvals reset automatically. Exceeding the plan limit returns a hard 402.</p>
+    </section>
+    <section class="section glass"><h2>Cashfree checkout</h2>
+      <p class="sub">Hosted monthly forms only. Grant never handles payment details. Annual pricing is display-only.</p>
+      <p><a class="btn mini" href="/v1/checkout/plus?org_id={clean(org, 60)}">Plus · $20/mo · ₹2,400</a></p>
+      <p><a class="btn ghost mini" href="/v1/checkout/pro?org_id={clean(org, 60)}">Pro · $150/mo</a></p>
+      <p><a class="btn ghost mini" href="{html.escape(str(enterprise), quote=True)}">Enterprise · $4,000/mo · contact</a></p>
+      <p class="sub">Form links: <a href="{html.escape(cashfree_plus, quote=True)}">Plus</a> · <a href="{html.escape(cashfree_pro, quote=True)}">Pro</a></p>
+      <form method="post" action="/account/claim" class="form-row">
+        <input name="claim" maxlength="254" placeholder="Checkout email or Payment ID" required>
+        <button class="btn mini" type="submit">Claim payment</button>
+      </form>
+    </section>
+    <section class="section glass"><h2>Auto-approve rules</h2>
+      <p class="sub">Kill switches and spend/scope caps. Conditional rules require Plus.</p>
+      {rule_html}
+    </section>
+    <section class="section glass"><h2>Audit trail</h2>
+      <table class="table"><thead><tr><th>Request</th><th>Agent</th><th>Action</th><th>Status</th><th>Decision</th></tr></thead><tbody>{audit_rows}</tbody></table>
+    </section>
+    <section class="section glass"><h2>Login & device history</h2>
+      <table class="event-table"><thead><tr><th>When</th><th>Source</th><th>Device</th></tr></thead><tbody>{login_rows}</tbody></table>
+      <h3 style="margin-top:18px">Pop-ups</h3>
+      <table class="event-table"><thead><tr><th>When</th><th>Channel</th><th>Device</th><th>Decision</th></tr></thead><tbody>{popup_rows}</tbody></table>
+      <p class="sub">Only salted hashes and coarse device labels are stored. No IPs or raw device IDs.</p>
+    </section>
+    <section class="section glass"><h2>API keys & integrations</h2>
+      <p class="sub">Mint a <code>gr_live_</code> key. Raw material is shown once; Grant stores only its SHA-256 hash.</p>
+      <form method="post" action="/account/keys" class="form-row">
+        <input type="text" name="name" maxlength="60" placeholder="Key name">
+        <button class="btn mini" type="submit">Mint key</button>
+      </form>
+      {key_rows}
+      <p class="sub">OpenAPI: <a href="/openapi.json">{html.escape(base, quote=True)}/openapi.json</a></p>
+      <p class="sub">MCP: <a href="/api/mcp">{html.escape(base, quote=True)}/api/mcp</a></p>
+      <p class="sub">Gate webhook: <code>{html.escape(base, quote=True)}/v1/gate/webhook</code></p>
+    </section>
+  </div>
+  <p class="zero-note">Grant never sees your credentials or payment details. It only records what you allowed.</p>
+  <div class="install-card">
+    <button class="btn ghost mini" type="button" data-grant-install>Add Shortcut</button>
+    <a class="btn ghost mini" href="/signup?next=/account">Sign-up flow</a>
+  </div>
+  <p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p>
+</section>
+"""
+    return page("Grant account", body, "Your Grant account, plan, rules, receipts, and integrations.", private=True)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home() -> HTMLResponse:
     return HTMLResponse(home_page())
@@ -3285,6 +4178,110 @@ async def verify_magic_link(
     return response
 
 
+@app.post("/v1/auth/otp")
+async def send_otp(http_request: Request) -> Response:
+    """Email a six-digit sign-in code as an alternative to magic links."""
+    if rate_limited(http_request):
+        raise HTTPException(status_code=429, detail="Too many sign-in codes. Slow down.")
+    data = await _request_fields(http_request)
+    email = normalize_billing_email(data.get("email", ""))
+    if not valid_email(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    org = billing.safe_org_id(data.get("org_id", "")) or ""
+    claim = str(data.get("claim_token", ""))[:120]
+    next_path = safe_next_path(str(data.get("next", ""))) if data.get("next") else ""
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    otp_digest = hash_token(f"otp|{email}|{code}")
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO magic_links (token_hash, email, org_id, claim_token, otp_hash, "
+            "expires_at, used_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+            (
+                hash_token("otp_" + new_code(24)),
+                email,
+                org or None,
+                claim or None,
+                otp_digest,
+                iso_plus(10),
+                iso(),
+            ),
+        )
+    try:
+        provider = emailer.send_otp(email, code, env=os.environ)
+    except emailer.EmailError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    if "application/json" in http_request.headers.get("content-type", ""):
+        result: dict[str, Any] = {"ok": True, "delivery": provider}
+        if provider == "console":
+            result["dev_code"] = code
+        return JSONResponse(result)
+    dev = (
+        f'<p class="sub">Development code: <code>{html.escape(code, quote=True)}</code></p>'
+        if provider == "console"
+        else ""
+    )
+    body = header() + f"""<section class="done glass"><div class="seal">✓</div>
+<h1>Sign-in code sent.</h1><p class="lede">Enter the six-digit Grant code to continue.</p>{dev}
+<p class="sub">The code expires in 10 minutes and works once.</p></section>"""
+    return HTMLResponse(
+        page("Sign-in code sent — Grant", body, "Check your email for your Grant sign-in code.", private=True)
+    )
+
+
+@app.post("/v1/auth/otp/verify")
+async def verify_otp(http_request: Request) -> Response:
+    if rate_limited(http_request):
+        raise HTTPException(status_code=429, detail="Too many attempts. Slow down.")
+    data = await _request_fields(http_request)
+    email = normalize_billing_email(data.get("email", ""))
+    code = re.sub(r"\D", "", str(data.get("code", "")))[:12]
+    if not valid_email(email) or not code:
+        raise HTTPException(status_code=400, detail="Enter your email and sign-in code.")
+    digest = hash_token(f"otp|{email}|{code}")
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM magic_links WHERE otp_hash = ? AND used_at IS NULL AND expires_at >= ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (digest, iso()),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="This sign-in code is invalid or expired.")
+        conn.execute("UPDATE magic_links SET used_at = ? WHERE token_hash = ?", (iso(), row["token_hash"]))
+        user = find_or_create_user(conn, str(row["email"]))
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (iso(), user["id"]))
+        org = billing.safe_org_id(row["org_id"]) or ""
+        existing = conn.execute("SELECT 1 FROM workspaces WHERE code = ?", (org,)).fetchone() if org else None
+        if not existing:
+            org = "ws_" + new_code(9)
+            create_org_record(conn, org, "My agents", user["id"])
+        else:
+            conn.execute(
+                "UPDATE organizations SET owner_user_id = ? WHERE id = ? "
+                "AND (owner_user_id IS NULL OR owner_user_id = '')",
+                (user["id"], org),
+            )
+        link_claim_rules(conn, str(row["claim_token"] or ""), user["id"])
+        session_id = create_session(conn, user["id"], org, str(row["email"]))
+    telemetry.record_login(http_request, subject=user["id"], email=str(row["email"]), source="otp")
+    target = safe_next_path(str(data.get("next", ""))) if data.get("next") else ""
+    if not target or not target.startswith("/"):
+        target = f"/w/{org}"
+    if "application/json" in http_request.headers.get("content-type", ""):
+        response: Response = JSONResponse({"ok": True, "next": target, "org_id": org})
+    else:
+        response = RedirectResponse(target, status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        max_age=SESSION_DAYS * 24 * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=http_request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
 @app.get("/api/keys")
 async def list_api_keys(http_request: Request) -> JSONResponse:
     """List live key metadata. Raw key material is never stored or returned."""
@@ -3410,23 +4407,34 @@ async def create_rule(body: RuleIn, http_request: Request) -> JSONResponse:
     if body.max_amount is not None or body.scope:
         require_feature(org, "conditional_auto_approve")
     scope_json, _ = canonical_scope(body.scope)
+    condition_json = canonical_json(body.condition) if body.condition else ""
     rule_id = "rule_" + new_code(12)
     created = iso()
+    expires = iso_plus(round((body.expires_in_seconds or 30 * 86_400) / 60))
+    principal = principal_from_request(http_request)
+    owner = str(body.owner_user_id or (principal.get("user_id") if principal else "") or "")[:120]
+    device = telemetry.device_hash(http_request)
     with transaction() as conn:
         conn.execute(
-            "INSERT INTO auto_approve_rules (id, org_id, user_id, agent, action, scope_json, "
-            "max_amount, multi_approver, claim_token, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+            "INSERT INTO auto_approve_rules (id, org_id, user_id, agent, action, agent_name, "
+            "tool_name, scope_json, condition_json, max_amount, multi_approver, claim_token, "
+            "device_hash, expires_at, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
             (
                 rule_id,
                 org,
-                "",
+                owner or None,
+                body.agent.strip()[:120],
+                body.action.strip()[:120],
                 body.agent.strip()[:120],
                 body.action.strip()[:120],
                 scope_json,
+                condition_json[:2000],
                 body.max_amount,
                 1 if body.multi_approver else 0,
                 str(body.claim_token or "")[:120] or None,
+                device,
+                expires,
                 created,
             ),
         )
@@ -3673,16 +4681,38 @@ async def checkout(plan: str, cycle: str = "monthly", org_id: str = "public") ->
     return RedirectResponse(url, status_code=302)
 
 
-@app.post("/v1/billing/webhook")
-async def billing_webhook(http_request: Request) -> JSONResponse:
+def action_from_receipt(receipt: dict[str, str]) -> dict[str, str] | None:
+    """Map a verified Cashfree receipt to a user-owned org when possible."""
+    org = org_for_checkout_email(str(receipt.get("email") or ""))
+    if not org:
+        return None
+    return {
+        "org_id": org,
+        "tier": str(receipt.get("tier") or "plus"),
+        "status": "active",
+        "event_type": str(receipt.get("event_type") or "cashfree_payment"),
+        "event_id": str(receipt.get("event_id") or "")[:120],
+        "email": str(receipt.get("email") or ""),
+        "customer_ref": str(receipt.get("payment_ref") or "")[:120],
+        "checkout_id": str(receipt.get("payment_ref") or "")[:120],
+        "payment_ref": str(receipt.get("payment_ref") or "")[:120],
+        "paid_at": str(receipt.get("paid_at") or "")[:40],
+    }
+
+
+async def handle_billing_webhook(http_request: Request) -> JSONResponse:
     raw = await http_request.body()
     payload = billing.decode_webhook_body(raw)
     if payload is None:
         return JSONResponse(content={"ok": True, "applied": False, "reason": "ignored"})
-    action = billing.normalize_event(payload) or billing.normalize_form_event(
-        payload, org_resolver=org_for_billing_email
-    )
-    receipt = None if action else billing.normalize_cashfree_receipt(payload)
+    receipt = billing.normalize_cashfree_receipt(payload)
+    action = billing.normalize_event(payload)
+    if not action and receipt:
+        action = billing.normalize_form_event(payload, org_resolver=org_for_checkout_email)
+        if not action:
+            action = action_from_receipt(receipt)
+    if action and receipt and receipt.get("email"):
+        action["email"] = str(receipt["email"])
     if not action and not receipt:
         return JSONResponse(content={"ok": True, "applied": False, "reason": "ignored"})
 
@@ -3720,6 +4750,17 @@ async def billing_webhook(http_request: Request) -> JSONResponse:
             "stored_unclaimed": bool(receipt and record_unclaimed_payment(receipt)),
         }
     )
+
+
+@app.post("/v1/billing/webhook")
+async def billing_webhook(http_request: Request) -> JSONResponse:
+    return await handle_billing_webhook(http_request)
+
+
+@app.post("/api/webhooks/cashfree")
+async def cashfree_webhook(http_request: Request) -> JSONResponse:
+    """Aliased signed Cashfree endpoint used by the account integration docs."""
+    return await handle_billing_webhook(http_request)
 
 
 @app.get("/api/billing/status")
@@ -4693,6 +5734,7 @@ async def decide(
         {"status": "decided", "decision": decision, "decision_at": iso(), "policy": decision}
     )
     await blob_put_request(snapshot, decided=True)
+    await dispatch_callback(row, decision)
 
     response = RedirectResponse(
         approval_path(token, parent_origin=parent_origin, compact=compact), status_code=303
@@ -4716,6 +5758,771 @@ async def decide(
             path="/",
         )
     return response
+
+
+def _approval_snapshots(request_id: str) -> tuple[sqlite3.Row | dict[str, Any] | None, sqlite3.Row | None]:
+    """Return the hot request row plus its durable approval ledger row."""
+    rid = str(request_id or "")[:120]
+    request_row = get_request_by_id(rid)
+    with closing(db()) as conn:
+        canonical = conn.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (rid,)
+        ).fetchone()
+    if request_row is None and canonical is not None:
+        request_row = {
+            "id": canonical["id"],
+            "workspace": canonical["org_id"],
+            "agent": canonical["agent"],
+            "action": canonical["action"],
+            "summary": canonical["summary"],
+            "scope_json": canonical["scope_json"],
+            "scope_hash": canonical["scope_hash"],
+            "requester": canonical["requester"],
+            "channel": canonical["channel"],
+            "gateway_hash": canonical["gateway_hash"],
+            "created_at": canonical["created_at"],
+            "expires_at": canonical["expires_at"],
+            "status": canonical["status"],
+            "decision": canonical["decision"],
+            "decision_at": canonical["decision_at"],
+            "policy": canonical["policy"],
+        }
+    return request_row, canonical
+
+
+def _signed_receipt_for(canonical: sqlite3.Row | None) -> tuple[bool, dict[str, Any] | None]:
+    stored = str(row_value(canonical, "signed_receipt", "") or "") if canonical is not None else ""
+    if not stored:
+        return False, None
+    return verify_signed_receipt(stored)
+
+
+def _receipt_response(
+    request_row: sqlite3.Row | dict[str, Any], canonical: sqlite3.Row | None
+) -> HTMLResponse:
+    verified, payload = _signed_receipt_for(canonical)
+    if not verified or payload is None:
+        verified = False
+        payload = None
+    return HTMLResponse(
+        receipt_page(request_row, verified, payload),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_TOOLS = (
+    {
+        "name": "grant.request_approval",
+        "description": (
+            "Create one scoped human checkpoint. Returns a private approval URL; "
+            "Grant never receives credentials or payment details."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+                "scope": {"type": "object", "default": {}},
+                "workspace": {"type": "string", "maxLength": 60},
+                "callback_url": {"type": "string", "maxLength": 500},
+                "callback_secret": {"type": "string", "maxLength": 200},
+            },
+            "required": ["agent_name", "tool_name", "summary"],
+        },
+    },
+    {
+        "name": "grant.get_request",
+        "description": "Read the public status and signed receipt of one Grant request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"request_id": {"type": "string", "minLength": 1, "maxLength": 120}},
+            "required": ["request_id"],
+        },
+    },
+)
+
+
+def public_openapi_document() -> dict[str, Any]:
+    """A hand-written OpenAPI 3.1 contract for the zero-wrapper surfaces."""
+    base = PUBLIC_BASE_URL or "https://grant-approve.vercel.app"
+    ok_json = {
+        "description": "Success. Public responses never include credentials, raw PII, or scope values.",
+        "content": {"application/json": {"schema": {"type": "object"}}},
+    }
+    error_json = {
+        "description": "Hard gate, invalid request, or demo limit.",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GrantError"}}},
+    }
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Grant Zero-Wrapper API",
+            "version": "0.1.0",
+            "description": (
+                "Consent infrastructure for AI agents. API keys are Bearer "
+                "gr_live_... strings. Credential-less calls are limited to "
+                "20/hour per hashed IP. Every HTML screen carries: Grant never "
+                "sees your credentials or payment details. It only records what "
+                "you allowed."
+            ),
+        },
+        "servers": [{"url": base}],
+        "tags": [
+            {"name": "Discovery", "description": "Machine-readable contract and MCP setup."},
+            {"name": "Gate", "description": "Zero-wrapper agent approval gate."},
+            {"name": "Receipts", "description": "Public signed Magic Receipts."},
+        ],
+        "paths": {
+            "/openapi.json": {
+                "get": {
+                    "tags": ["Discovery"],
+                    "summary": "This OpenAPI 3.1 document",
+                    "operationId": "getOpenApi",
+                    "responses": {"200": ok_json},
+                }
+            },
+            "/api/openapi.json": {
+                "get": {
+                    "tags": ["Discovery"],
+                    "summary": "Aliased OpenAPI 3.1 document",
+                    "operationId": "getOpenApiAlias",
+                    "responses": {"200": ok_json},
+                }
+            },
+            "/api/mcp": {
+                "get": {
+                    "tags": ["Discovery"],
+                    "summary": "Browser setup card for the MCP endpoint",
+                    "operationId": "mcpSetup",
+                    "responses": {
+                        "200": {
+                            "description": "MCP setup HTML",
+                            "content": {"text/html": {"schema": {"type": "string"}}},
+                        }
+                    },
+                },
+                "post": {
+                    "tags": ["Discovery"],
+                    "summary": "MCP JSON-RPC (initialize, tools/list, tools/call)",
+                    "operationId": "mcpRpc",
+                    "security": [{"GrantLiveKey": []}, {}],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/JsonRpcRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "JSON-RPC result or error",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/JsonRpcResponse"}
+                                }
+                            },
+                        },
+                        "429": error_json,
+                    },
+                },
+            },
+            "/v1/gate/webhook": {
+                "post": {
+                    "tags": ["Gate"],
+                    "summary": "Create a human checkpoint (or apply an active rule first)",
+                    "operationId": "gateWebhook",
+                    "security": [{"GrantLiveKey": []}, {}],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GateRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "201": ok_json,
+                        "202": ok_json,
+                        "402": error_json,
+                        "403": error_json,
+                        "429": error_json,
+                    },
+                }
+            },
+            "/receipt/{req_id}": {
+                "get": {
+                    "tags": ["Receipts"],
+                    "summary": "Public HMAC-signed Magic Receipt",
+                    "operationId": "getReceipt",
+                    "parameters": [
+                        {
+                            "name": "req_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Magic Receipt HTML",
+                            "content": {"text/html": {"schema": {"type": "string"}}},
+                        },
+                        "404": error_json,
+                    },
+                }
+            },
+        },
+        "components": {
+            "securitySchemes": {
+                "GrantLiveKey": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "gr_live_",
+                    "description": "A live Grant API key. Omit it for the 20/hour demo mode.",
+                }
+            },
+            "schemas": {
+                "JsonRpcRequest": {
+                    "type": "object",
+                    "properties": {
+                        "jsonrpc": {"const": "2.0"},
+                        "id": {"type": ["string", "integer", "null"]},
+                        "method": {"type": "string"},
+                        "params": {"type": "object"},
+                    },
+                    "required": ["jsonrpc", "method"],
+                },
+                "JsonRpcResponse": {
+                    "type": "object",
+                    "properties": {
+                        "jsonrpc": {"const": "2.0"},
+                        "id": {"type": ["string", "integer", "null"]},
+                        "result": {"type": "object"},
+                        "error": {"type": "object"},
+                    },
+                },
+                "GateRequest": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {"type": "string"},
+                        "action": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "scope": {"type": "object"},
+                        "workspace": {"type": "string"},
+                        "callback_url": {"type": "string"},
+                        "callback_secret": {"type": "string"},
+                    },
+                    "required": ["agent", "action", "summary"],
+                    "description": "Aliases agent_name/tool_name/reason/why are accepted.",
+                },
+                "GrantError": {
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "object",
+                            "properties": {
+                                "error": {"type": "string"},
+                                "required_tier": {"type": "string"},
+                                "code": {"type": "string"},
+                            },
+                        }
+                    },
+                },
+            },
+        },
+        "x-grant": {
+            "demo_limit_per_hour": DEMO_LIMIT_PER_HOUR,
+            "callback_max_retries": CALLBACK_MAX_RETRIES,
+            "cors": "Public integration paths send Access-Control-Allow-Origin: *.",
+            "privacy": "No credentials, payment details, raw scope values, or raw PII are returned.",
+        },
+    }
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_json() -> JSONResponse:
+    return JSONResponse(
+        public_openapi_document(),
+        headers={"Cache-Control": "public, s-maxage=300", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+@app.get("/api/openapi.json", include_in_schema=False)
+async def openapi_json_alias() -> JSONResponse:
+    return await openapi_json()
+
+
+@app.get("/api/mcp", response_class=HTMLResponse)
+async def mcp_setup(http_request: Request) -> HTMLResponse:
+    return HTMLResponse(
+        mcp_setup_page(), headers={"Cache-Control": "no-store"}
+    )
+
+
+def _mcp_arguments(params: dict[str, Any]) -> dict[str, Any]:
+    arguments = params.get("arguments")
+    return arguments if isinstance(arguments, dict) else {}
+
+
+def _callback_url_is_valid(value: str) -> bool:
+    url = str(value or "").strip()
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return False
+    return not IS_PRODUCTION or parts.scheme == "https"
+
+
+@app.post("/api/mcp")
+async def mcp(http_request: Request) -> Response:
+    principal = validate_bearer_if_present(http_request)
+    if not public_call_allowed(http_request, bucket="mcp", authorized=bool(principal)):
+        raise HTTPException(status_code=429, detail="Demo limit reached. Add a Grant API key.")
+    try:
+        body = await http_request.json()
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="MCP request must be JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="MCP request must be a JSON object.")
+    mcp_id = body.get("id")
+    method = str(body.get("method", ""))
+    params = body.get("params") if isinstance(body.get("params"), dict) else {}
+    if not method:
+        return mcp_error(mcp_id, -32600, "Missing JSON-RPC method.")
+    if method == "notifications/initialized":
+        return Response(status_code=204)
+    if method == "initialize":
+        requested = str(params.get("protocolVersion") or MCP_PROTOCOL_VERSION)
+        return JSONResponse(
+            content={
+                "jsonrpc": "2.0",
+                "id": mcp_id,
+                "result": {
+                    "protocolVersion": requested if requested == MCP_PROTOCOL_VERSION else MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": "grant", "version": "0.1.0"},
+                    "instructions": (
+                        "Grant records one scoped human decision. It never sees credentials "
+                        "or payment details."
+                    ),
+                },
+            }
+        )
+    if method == "tools/list":
+        return JSONResponse(
+            content={"jsonrpc": "2.0", "id": mcp_id, "result": {"tools": list(MCP_TOOLS)}}
+        )
+    if method != "tools/call":
+        return mcp_error(mcp_id, -32601, "Method not found.")
+    tool_name = str(params.get("name", ""))
+    args = _mcp_arguments(params)
+    try:
+        if tool_name == "grant.request_approval":
+            agent = str(args.get("agent_name") or args.get("agent") or "").strip()[:120]
+            action = str(args.get("tool_name") or args.get("action") or "").strip()[:120]
+            summary = str(args.get("summary") or args.get("reason") or args.get("why") or "").strip()[:500]
+            if not agent or not action or not summary:
+                return mcp_error(mcp_id, -32602, "agent_name, tool_name, and summary are required.")
+            scope = args.get("scope") if isinstance(args.get("scope"), dict) else {}
+            callback_url = str(args.get("callback_url") or "").strip()[:500]
+            if callback_url and not _callback_url_is_valid(callback_url):
+                return mcp_error(mcp_id, -32602, "callback_url must be a valid HTTPS URL.")
+            org = principal["org_id"] if principal else safe_org_id(args.get("workspace"))
+            if callback_url:
+                require_feature(org, "instant_delivery")
+            result = create_request(
+                RequestIn(
+                    agent=agent,
+                    action=action,
+                    summary=summary,
+                    scope=scope,
+                    requester="mcp-client",
+                    workspace=org,
+                    callback_url=callback_url,
+                    callback_secret=str(args.get("callback_secret") or "").strip()[:200],
+                    owner_user_id=str(
+                        args.get("owner_user_id")
+                        or (principal.get("user_id") if principal else "")
+                        or ""
+                    )[:120],
+                    ttl_minutes=int(args.get("ttl_minutes") or 30),
+                    channel="mcp",
+                )
+            )
+            content = {
+                "request_id": result["id"],
+                "status": "pending",
+                "approval_url": result["approval_url"],
+                "receipt_url": f"/receipt/{result['id']}",
+                "expires_at": result["expires_at"],
+                "scope_hash": result["scope_hash"],
+            }
+        elif tool_name == "grant.get_request":
+            request_id = str(args.get("request_id") or "").strip()[:120]
+            if not request_id:
+                return mcp_error(mcp_id, -32602, "request_id is required.")
+            request_row, canonical = _approval_snapshots(request_id)
+            if request_row is None:
+                return mcp_error(mcp_id, -32602, "Grant request not found.")
+            verified, payload = _signed_receipt_for(canonical)
+            content = {
+                "request_id": request_id,
+                "status": str(row_value(canonical, "status", request_row["status"])),
+                "decision": str(row_value(canonical, "decision", request_row["decision"]) or ""),
+                "decision_type": str(row_value(canonical, "decision_type", "") or ""),
+                "signed_receipt": str(row_value(canonical, "signed_receipt", "") or ""),
+                "receipt_verified": bool(verified),
+                "receipt": payload or {},
+                "receipt_url": f"/receipt/{request_id}",
+            }
+        else:
+            return mcp_error(mcp_id, -32602, "Unknown Grant tool.")
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        return mcp_error(mcp_id, exc.status_code, str(detail.get("message", detail)))
+    except (TypeError, ValueError):
+        return mcp_error(mcp_id, -32602, "Invalid tool arguments.")
+    return JSONResponse(content={"jsonrpc": "2.0", "id": mcp_id, "result": content})
+
+
+@app.post("/v1/gate/webhook")
+async def gate_webhook(payload: GateWebhookIn, http_request: Request) -> JSONResponse:
+    """Zero-wrapper gate call: rules first, then a quiet human checkpoint."""
+    principal = validate_bearer_if_present(http_request)
+    if not public_call_allowed(http_request, bucket="gate", authorized=bool(principal)):
+        raise HTTPException(status_code=429, detail="Demo limit reached. Add a Grant API key.")
+    org = principal["org_id"] if principal else safe_org_id(payload.workspace)
+    if payload.callback_url and not _callback_url_is_valid(payload.callback_url):
+        raise HTTPException(status_code=400, detail="callback_url must be a valid HTTPS URL.")
+    if payload.callback_url:
+        require_feature(org, "instant_delivery")
+    scope_json, _ = canonical_scope(payload.scope)
+    rule = find_matching_rule(org, payload.agent, payload.action, scope_json)
+    if rule:
+        require_feature(org, "conditional_auto_approve")
+    result = create_request(
+        RequestIn(
+            agent=payload.agent,
+            action=payload.action,
+            summary=payload.summary,
+            scope=payload.scope,
+            requester="gate-webhook",
+            workspace=org,
+            callback_url=payload.callback_url,
+            callback_secret=payload.callback_secret,
+            owner_user_id=str(
+                payload.owner_user_id
+                or (principal.get("user_id") if principal else "")
+                or ""
+            )[:120],
+            ttl_minutes=payload.ttl_minutes,
+            channel=payload.channel,
+        )
+    )
+    row = get_request_by_id(result["id"])
+    decision = "auto_rule" if rule else ""
+    if decision and row and decide_request(row, decision):
+        await blob_put_request(dict(row), decided=True)
+    if row:
+        await dispatch_callback(row, decision)
+    canonical_row = None
+    with closing(db()) as conn:
+        canonical_row = conn.execute(
+            "SELECT signed_receipt, decision_type FROM approval_requests WHERE id = ?",
+            (result["id"],),
+        ).fetchone()
+    decision_type = str(row_value(canonical_row, "decision_type", "") or "")
+    return JSONResponse(
+        status_code=201 if rule else 202,
+        content={
+            "id": result["id"],
+            "status": "approved" if rule else "pending",
+            "rule_id": str(rule["id"]) if rule else "",
+            "approval_url": result["approval_url"],
+            "receipt_url": f"/receipt/{result['id']}",
+            "decision_type": decision_type,
+            "signed_receipt": str(row_value(canonical_row, "signed_receipt", "") or ""),
+            "expires_at": result["expires_at"],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/receipt/{req_id}", response_class=HTMLResponse)
+async def public_receipt(req_id: str) -> HTMLResponse:
+    request_row, canonical = _approval_snapshots(req_id)
+    if request_row is None:
+        raise HTTPException(status_code=404, detail="Receipt not found.")
+    return _receipt_response(request_row, canonical)
+
+
+@app.get("/approve/{req_id}", response_class=HTMLResponse)
+async def checkpoint(http_request: Request, req_id: str) -> HTMLResponse:
+    request_row, canonical = _approval_snapshots(req_id)
+    if request_row is None:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if row_value(canonical, "status", request_row["status"]) == "decided":
+        return _receipt_response(request_row, canonical)
+    if expired(request_row):
+        raise HTTPException(status_code=410, detail="This request has expired.")
+    telemetry.record_popup(
+        http_request,
+        request_id=str(request_row["id"]),
+        org_id=str(request_row["workspace"]),
+        channel="browser_popup",
+    )
+    return HTMLResponse(checkpoint_page(request_row), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/approve/{req_id}/decide")
+async def checkpoint_decide(
+    http_request: Request, req_id: str, decision: str = Form("")
+) -> RedirectResponse:
+    choice = str(decision or "").strip().lower()
+    if choice not in {"approve", "always", "reject"}:
+        raise HTTPException(status_code=400, detail="Invalid decision.")
+    request_row, canonical = _approval_snapshots(req_id)
+    if request_row is None:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if row_value(canonical, "status", request_row["status"]) == "decided":
+        return RedirectResponse(f"/receipt/{req_id}", status_code=303)
+    if expired(request_row):
+        raise HTTPException(status_code=410, detail="This request has expired.")
+    if not decide_request(request_row, choice):
+        return RedirectResponse(f"/receipt/{req_id}", status_code=303)
+    if choice == "always":
+        rule_id = "rule_" + new_code(12)
+        with transaction() as conn:
+            conn.execute(
+                "INSERT INTO auto_approve_rules (id, org_id, user_id, agent, action, agent_name, "
+                "tool_name, scope_json, max_amount, status, created_at, expires_at, device_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?, ?)",
+                (
+                    rule_id,
+                    safe_org_id(request_row["workspace"]),
+                    str(row_value(canonical, "owner_user_id", "") or "")[:120] or None,
+                    request_row["agent"][:120],
+                    request_row["action"][:120],
+                    request_row["agent"][:120],
+                    request_row["action"][:120],
+                    str(request_row["scope_json"])[:4000],
+                    iso(),
+                    iso_plus(365 * 24 * 60),
+                    telemetry.device_hash(http_request),
+                ),
+            )
+    telemetry.mark_decision(str(request_row["id"]), choice, http_request)
+    snapshot = dict(request_row)
+    snapshot.update({"status": "decided", "decision": choice, "decision_at": iso()})
+    await blob_put_request(snapshot, decided=True)
+    await dispatch_callback(request_row, choice)
+    return RedirectResponse(f"/receipt/{req_id}", status_code=303)
+
+
+@app.get("/signup", response_class=HTMLResponse)
+async def signup(next: str = "/account", error: int = 0) -> HTMLResponse:
+    return HTMLResponse(
+        signup_page(next, bool(error)), headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/signup")
+async def signup_submit(http_request: Request) -> Response:
+    if rate_limited(http_request):
+        raise HTTPException(status_code=429, detail="Too many sign-ups. Slow down.")
+    data = await _request_fields(http_request)
+    target = safe_next_path(str(data.get("next") or "/account"))
+    if str(data.get("installed") or "") != "1":
+        return RedirectResponse(
+            f"/signup?{urlencode({'next': target, 'error': 1})}", status_code=303
+        )
+    email = normalize_billing_email(data.get("email", ""))
+    if not valid_email(email):
+        return RedirectResponse(
+            f"/signup?{urlencode({'next': target, 'error': 1})}", status_code=303
+        )
+    raw = "ml_" + new_code(24)
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO magic_links (token_hash, email, org_id, claim_token, expires_at, "
+            "used_at, created_at) VALUES (?, ?, ?, NULL, ?, NULL, ?)",
+            (hash_token(raw), email, None, iso_plus(MAGIC_LINK_TTL_MINUTES), iso()),
+        )
+    base = PUBLIC_BASE_URL or str(http_request.base_url).rstrip("/")
+    link = f"{base}/auth/verify?{urlencode({'token': raw, 'next': target})}"
+    try:
+        provider = emailer.send_magic_link(email, link, env=os.environ)
+    except emailer.EmailError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    dev = (
+        f'<p class="sub"><a href="{html.escape(link, quote=True)}">Open the development link</a></p>'
+        if provider == "console"
+        else ""
+    )
+    body = header() + f"""<section class="intro glass"><div class="seal">✓</div>
+<h1>Check your email.</h1><p class="lede left">Your one-time Grant sign-in link is on its way. Add the shortcut now so the next checkpoint opens as an app.</p>{dev}
+<div class="install-card"><button class="btn" type="button" data-grant-install>Add Shortcut</button></div>
+<p class="sub">The link expires in {MAGIC_LINK_TTL_MINUTES} minutes and works once.</p>
+<p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p></section>"""
+    return HTMLResponse(
+        page("Check your email — Grant", body, "Your Grant sign-in link is ready.", private=True),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/account", response_class=HTMLResponse)
+async def account(http_request: Request, claim: str = "") -> HTMLResponse:
+    principal = principal_from_request(http_request)
+    return HTMLResponse(
+        account_page(http_request, principal, claim=claim),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/account/keys")
+async def account_mint_key(http_request: Request, name: str = Form("")) -> HTMLResponse:
+    principal = require_user_principal(http_request)
+    with transaction() as conn:
+        _, raw = mint_api_key(conn, principal["org_id"], principal["user_id"], name)
+    return HTMLResponse(
+        account_page(http_request, principal, raw_key=raw),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/account/claim")
+async def account_claim(http_request: Request, claim: str = Form("")) -> RedirectResponse:
+    principal = require_user_principal(http_request)
+    marker = "ok" if claim_unclaimed_payment(principal["org_id"], claim) else "missing"
+    return RedirectResponse(f"/account?claim={marker}", status_code=303)
+
+
+@app.post("/account/rules/{rule_id}/revoke")
+async def account_revoke_rule(http_request: Request, rule_id: str) -> RedirectResponse:
+    principal = require_user_principal(http_request)
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE auto_approve_rules SET status = 'revoked', revoked_at = ? WHERE id = ? "
+            "AND (org_id = ? OR user_id = ?)",
+            (iso(), rule_id[:120], principal["org_id"], principal["user_id"]),
+        )
+    return RedirectResponse("/account?rule=revoked", status_code=303)
+
+
+@app.post("/account/rules/{rule_id}/cap")
+async def account_rule_cap(http_request: Request, rule_id: str) -> RedirectResponse:
+    principal = require_user_principal(http_request)
+    require_feature(principal["org_id"], "conditional_auto_approve")
+    data = await _request_fields(http_request)
+    raw_cap = str(data.get("max_amount") or "").strip()
+    try:
+        cap = float(raw_cap) if raw_cap else None
+    except ValueError:
+        return RedirectResponse("/account?cap=invalid", status_code=303)
+    if cap is not None and (cap < 0 or cap > 1_000_000_000):
+        return RedirectResponse("/account?cap=invalid", status_code=303)
+    raw_condition = str(data.get("condition") or "").strip()
+    condition = "{}"
+    if raw_condition:
+        try:
+            parsed = json.loads(raw_condition)
+            condition = canonical_json(parsed) if isinstance(parsed, dict) else ""
+        except json.JSONDecodeError:
+            return RedirectResponse("/account?cap=invalid", status_code=303)
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE auto_approve_rules SET max_amount = ?, condition_json = ? WHERE id = ? "
+            "AND (org_id = ? OR user_id = ?)",
+            (cap, condition, rule_id[:120], principal["org_id"], principal["user_id"]),
+        )
+    return RedirectResponse("/account?cap=saved", status_code=303)
+
+
+@app.get("/manifest.webmanifest")
+async def manifest() -> JSONResponse:
+    return JSONResponse(
+        content={
+            "name": "Grant — Zero-custody consent",
+            "short_name": "Grant",
+            "description": "One quiet human checkpoint for every AI agent action.",
+            "start_url": "/account",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#FAF8F5",
+            "theme_color": "#FAF8F5",
+            "icons": [
+                {
+                    "src": "/icons/icon-192.svg",
+                    "sizes": "192x192",
+                    "type": "image/svg+xml",
+                    "purpose": "any maskable",
+                },
+                {
+                    "src": "/icons/icon-512.svg",
+                    "sizes": "512x512",
+                    "type": "image/svg+xml",
+                    "purpose": "any maskable",
+                },
+            ],
+        },
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, s-maxage=3600"},
+    )
+
+
+@app.get("/sw.js", response_class=PlainTextResponse)
+async def service_worker() -> PlainTextResponse:
+    script = """
+const CACHE = 'grant-shell-v1';
+const PUBLIC_ASSETS = ['/', '/manifest.webmanifest', '/icons/icon-192.svg', '/icons/icon-512.svg'];
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PUBLIC_ASSETS)).then(() => self.skipWaiting()));
+});
+self.addEventListener('activate', (event) => {
+  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
+});
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') { return; }
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) { return; }
+  if (PUBLIC_ASSETS.includes(url.pathname)) {
+    event.respondWith(caches.match(request).then((cached) => cached || fetch(request).then((response) => {
+      const copy = response.clone();
+      caches.open(CACHE).then((cache) => cache.put(request, copy));
+      return response;
+    })));
+    return;
+  }
+  // Private screens such as /account are never cached.
+  if (request.mode === 'navigate') {
+    event.respondWith(fetch(request).catch(() => caches.match('/')));
+  }
+});
+"""
+    return PlainTextResponse(
+        script.strip(),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/icons/icon-{size}.svg", response_class=PlainTextResponse)
+async def pwa_icon(size: int) -> PlainTextResponse:
+    if size not in {192, 512}:
+        raise HTTPException(status_code=404, detail="Icon size not found.")
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}" role="img" aria-label="Grant">
+<rect width="{size}" height="{size}" rx="{size // 5}" fill="#FAF8F5"/>
+<rect x="{size // 10}" y="{size // 10}" width="{size - size // 5}" height="{size - size // 5}" rx="{size // 6}" fill="#6d2038"/>
+<text x="{size // 2}" y="{int(size * 0.66)}" font-size="{int(size * 0.5)}" text-anchor="middle" fill="#fff8f2" font-family="Georgia, serif" font-weight="700">G</text>
+</svg>"""
+    return PlainTextResponse(
+        svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, s-maxage=3600"},
+    )
 
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
