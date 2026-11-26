@@ -4,7 +4,9 @@ The app intentionally uses one very small query dialect (SQLite-style ``?``
 parameters). When ``DATABASE_URL``, ``NEON_DATABASE_URL`` or
 ``GRANT_NEON_DATABASE_URL`` is present, this module translates those queries to
 psycopg's ``%s`` style and applies the durable schema in ``migrations/``.
-Without a DSN, behavior is unchanged: a new SQLite connection per call.
+Without a DSN, behavior is unchanged for local development: a new SQLite
+connection per call. Production refuses to boot on that ephemeral fallback
+unless ``GRANT_ALLOW_SQLITE_IN_PROD=true`` is explicitly set.
 """
 from __future__ import annotations
 
@@ -27,10 +29,23 @@ _DSN = (
     or ""
 ).strip()
 _DB_LOCK = Lock()
+_APP_ENV = os.environ.get("GRANT_APP_ENV", "development").strip().lower()
+_ALLOW_SQLITE_IN_PROD = os.environ.get(
+    "GRANT_ALLOW_SQLITE_IN_PROD", ""
+).strip().lower() in {"1", "true", "yes"}
 
 
 def postgres_enabled() -> bool:
     return bool(_DSN)
+
+
+def require_production_store() -> None:
+    """Fail fast instead of silently serving ephemeral SQLite in production."""
+    if _APP_ENV == "production" and not _DSN and not _ALLOW_SQLITE_IN_PROD:
+        raise RuntimeError(
+            "DATABASE_URL is required in production. Set a Neon Postgres DSN "
+            "or explicitly set GRANT_ALLOW_SQLITE_IN_PROD=true."
+        )
 
 
 def schema_sql() -> str:

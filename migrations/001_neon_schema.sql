@@ -7,6 +7,35 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+-- Durable identity and tenant records. Emails live only in these private
+-- tables; no public endpoint returns them.
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_user_id TEXT,
+    plan_tier TEXT NOT NULL DEFAULT 'free',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    key_hash TEXT UNIQUE NOT NULL,
+    key_prefix TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     code TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -41,6 +70,61 @@ CREATE TABLE IF NOT EXISTS requests (
     decision TEXT,
     decision_at TEXT,
     policy TEXT
+);
+
+-- Canonical approval ledger. `requests` remains the hot compatibility table
+-- for gateways and signed-receipt retries; every row is mirrored here.
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    agent TEXT NOT NULL,
+    action TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    scope_hash TEXT NOT NULL,
+    requester TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'browser_popup',
+    gateway_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    decision TEXT,
+    decision_at TEXT,
+    policy TEXT
+);
+
+CREATE TABLE IF NOT EXISTS auto_approve_rules (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    user_id TEXT,
+    agent TEXT NOT NULL,
+    action TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    max_amount REAL,
+    claim_token TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    linked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS magic_links (
+    token_hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    org_id TEXT,
+    claim_token TEXT,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    email TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS permissions (
@@ -156,3 +240,10 @@ CREATE INDEX IF NOT EXISTS idx_login_session ON login_history(session_id, create
 CREATE INDEX IF NOT EXISTS idx_popup_opened ON popup_impressions(opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_popup_request ON popup_impressions(request_id);
 CREATE INDEX IF NOT EXISTS idx_popup_device ON popup_impressions(device_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_org ON api_keys(org_id, revoked_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rules_org ON auto_approve_rules(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_rules_claim ON auto_approve_rules(claim_token);
+CREATE INDEX IF NOT EXISTS idx_approval_org ON approval_requests(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_magic_email ON magic_links(email, created_at DESC);

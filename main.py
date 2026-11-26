@@ -181,6 +181,19 @@ def init_db() -> None:
     if dbmod.postgres_enabled():
         with transaction() as conn:
             conn.execute(dbmod.schema_sql())
+            conn.execute(
+                "INSERT INTO organizations (id, name, plan_tier, created_at) "
+                "SELECT code, name, 'free', created_at FROM workspaces "
+                "ON CONFLICT (id) DO NOTHING"
+            )
+            conn.execute(
+                "INSERT INTO approval_requests (id, org_id, token, agent, action, summary, "
+                "scope_json, scope_hash, requester, channel, gateway_hash, created_at, expires_at, "
+                "status, decision, decision_at, policy) SELECT id, workspace, token, agent, action, "
+                "summary, scope_json, scope_hash, requester, channel, gateway_hash, created_at, "
+                "expires_at, status, decision, decision_at, policy FROM requests "
+                "ON CONFLICT (id) DO NOTHING"
+            )
             _ensure_signing_secret(conn)
         return
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -197,12 +210,52 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS organizations (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                owner_user_id TEXT,
+                plan_tier TEXT NOT NULL DEFAULT 'free',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                key_hash TEXT UNIQUE NOT NULL,
+                key_prefix TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                revoked_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS workspaces (
                 code TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO organizations (id, name, plan_tier, created_at) "
+            "SELECT code, name, 'free', created_at FROM workspaces"
         )
         conn.execute(
             """
@@ -242,6 +295,78 @@ def init_db() -> None:
         )
         _ensure_column(conn, "requests", "channel", "TEXT NOT NULL DEFAULT 'browser_popup'")
         _ensure_column(conn, "requests", "gateway_hash", "TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS approval_requests (
+                id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                agent TEXT NOT NULL,
+                action TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                scope_hash TEXT NOT NULL,
+                requester TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT 'browser_popup',
+                gateway_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision TEXT,
+                decision_at TEXT,
+                policy TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO approval_requests (id, org_id, token, agent, action, summary, "
+            "scope_json, scope_hash, requester, channel, gateway_hash, created_at, expires_at, "
+            "status, decision, decision_at, policy) SELECT id, workspace, token, agent, action, "
+            "summary, scope_json, scope_hash, requester, channel, gateway_hash, created_at, "
+            "expires_at, status, decision, decision_at, policy FROM requests"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auto_approve_rules (
+                id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL,
+                user_id TEXT,
+                agent TEXT NOT NULL,
+                action TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                max_amount REAL,
+                claim_token TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                linked_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS magic_links (
+                token_hash TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                org_id TEXT,
+                claim_token TEXT,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                org_id TEXT NOT NULL,
+                email TEXT,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS permissions (
@@ -355,12 +480,23 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_permissions_agent ON permissions(agent, expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_permissions_source ON permissions(source_request)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_org_created ON usage_events(org_id, created_at)")
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS idx_api_keys_org ON api_keys(org_id, revoked_at)",
+            "CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_rules_org ON auto_approve_rules(org_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_rules_claim ON auto_approve_rules(claim_token)",
+            "CREATE INDEX IF NOT EXISTS idx_approval_org ON approval_requests(org_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id, expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_magic_email ON magic_links(email, created_at DESC)",
+        ):
+            conn.execute(statement)
         _ensure_signing_secret(conn)
         telemetry.ensure_sqlite_tables(conn)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    dbmod.require_production_store()
     init_db()
     yield
 
@@ -607,6 +743,29 @@ def get_workspace(code: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM workspaces WHERE code = ?", (code,)).fetchone()
 
 
+def get_organization(code: str) -> sqlite3.Row | None:
+    with closing(db()) as conn:
+        return conn.execute("SELECT * FROM organizations WHERE id = ?", (code,)).fetchone()
+
+
+def create_org_record(conn: Any, code: str, name: str, owner_user_id: str = "") -> None:
+    """Dual-write the capability workspace and durable organization records."""
+    now = iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO workspaces (code, name, created_at) VALUES (?, ?, ?)",
+        (code, name[:80] or "My agents", now),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO organizations (id, name, owner_user_id, plan_tier, created_at) "
+        "VALUES (?, ?, ?, 'free', ?)",
+        (code, name[:80] or "My agents", str(owner_user_id or "")[:120] or None, now),
+    )
+
+
+def sync_org_tier(conn: Any, org: str, tier: str) -> None:
+    conn.execute("UPDATE organizations SET plan_tier = ? WHERE id = ?", (tier, org))
+
+
 def safe_org_id(value: str | None) -> str:
     return billing.safe_org_id(value) or "public"
 
@@ -698,6 +857,7 @@ def get_plan(org_id: str | None) -> dict[str, Any]:
             return plan_from_row(row)
         plan = plans.default_plan(org)
         insert_plan(conn, plan)
+        sync_org_tier(conn, org, plans.effective_tier(plan))
         return plan
 
 
@@ -930,6 +1090,7 @@ def apply_billing_event(action: dict[str, str]) -> bool:
             plan["trial_ends_at"] = ""
         insert_plan(conn, plan)
         update_plan(conn, plan)
+        sync_org_tier(conn, org, plans.effective_tier(plan))
         if active_paid:
             reset_current_quota(conn, org)
             schedule_renewal_reminder(conn, action, org, now)
@@ -1363,6 +1524,29 @@ def create_request(payload: RequestIn, *, gateway_hash: str = "") -> dict[str, s
                 expires,
             ),
         )
+        conn.execute(
+            """
+            INSERT INTO approval_requests (
+                id, org_id, token, agent, action, summary, scope_json, scope_hash, requester,
+                channel, gateway_hash, created_at, expires_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """,
+            (
+                request_id,
+                org,
+                token,
+                payload.agent.strip(),
+                payload.action.strip(),
+                payload.summary.strip(),
+                scope_json,
+                scope_hash,
+                payload.requester.strip() or "agent",
+                telemetry.normalize_channel(payload.channel),
+                str(gateway_hash or "")[:120],
+                now,
+                expires,
+            ),
+        )
     record_usage(org, request_id)
     url = approval_path(token, parent_origin=payload.parent_origin)
     approval_url = f"{PUBLIC_BASE_URL}{url}" if PUBLIC_BASE_URL else url
@@ -1393,6 +1577,11 @@ def decide_request(row: sqlite3.Row, decision: str) -> bool:
         )
         if updated.rowcount != 1:
             return False
+        conn.execute(
+            "UPDATE approval_requests SET status = 'decided', decision = ?, decision_at = ?, "
+            "policy = ? WHERE id = ?",
+            (decision, now, decision, row["id"]),
+        )
         if decision in {"approve", "auto_rule", "always"}:
             permission = {
                 "id": "perm_" + new_code(9),
@@ -3652,10 +3841,7 @@ async def create_workspace(
     code = "ws_" + new_code(9)
     label = (name or "").strip()[:80] or "My agents"
     with transaction() as conn:
-        conn.execute(
-            "INSERT INTO workspaces (code, name, created_at) VALUES (?, ?, ?)",
-            (code, label, iso()),
-        )
+        create_org_record(conn, code, label)
     telemetry.record_login(http_request, subject=code, source="workspace")
     target = safe_next_path(next) if next else ""
     if not (target.startswith("/a/") or target.startswith("/pricing")):
@@ -3789,10 +3975,7 @@ async def decide(
         if not owned or not get_workspace(owned):
             owned = "ws_" + new_code(9)
             with transaction() as conn:
-                conn.execute(
-                    "INSERT INTO workspaces (code, name, created_at) VALUES (?, ?, ?)",
-                    (owned, "My agents", iso()),
-                )
+                create_org_record(conn, owned, "My agents")
             telemetry.record_login(http_request, subject=owned, source="workspace")
         response.set_cookie(
             DASHBOARD_COOKIE,

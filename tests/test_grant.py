@@ -46,10 +46,7 @@ def api():
 
 def ensure_workspace(code: str) -> None:
     with main.transaction() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO workspaces (code, name, created_at) VALUES (?, ?, ?)",
-            (code, f"{code} test", main.iso()),
-        )
+        main.create_org_record(conn, code, f"{code} test")
 
 
 def payload(agent="support-agent", action="refund_order", **overrides):
@@ -1440,3 +1437,47 @@ def test_public_api_allows_cross_origin_inject_and_a2a_calls(api):
         headers={"Origin": origin},
     ).headers["access-control-allow-origin"] == "*"
     assert "access-control-allow-origin" not in api.get("/docs").headers
+
+
+def test_neon_schema_declares_durable_launch_tables():
+    schema = (Path(__file__).resolve().parents[1] / "migrations" / "001_neon_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    for table in (
+        "users",
+        "organizations",
+        "api_keys",
+        "approval_requests",
+        "auto_approve_rules",
+        "login_history",
+        "popup_impressions",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in schema
+    assert "idx_rules_claim" in schema
+    assert "idx_api_keys_org" in schema
+
+
+def test_workspace_and_request_are_mirrored_into_durable_tables(api):
+    ensure_workspace("ws_durable")
+    body = create(api, agent="durable-agent", action="send_note", workspace="ws_durable")
+    with main.transaction() as conn:
+        org = conn.execute("SELECT * FROM organizations WHERE id = ?", ("ws_durable",)).fetchone()
+        approval = conn.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (body["id"],)
+        ).fetchone()
+    assert org["name"] == "ws_durable test"
+    assert org["plan_tier"] in {"free", "pro"}
+    assert approval["org_id"] == "ws_durable"
+    assert approval["token"] and approval["status"] == "pending"
+
+
+def test_production_refuses_ephemeral_sqlite_without_postgres(monkeypatch):
+    from grant import db as dbmod
+
+    monkeypatch.setattr(dbmod, "_APP_ENV", "production")
+    monkeypatch.setattr(dbmod, "_DSN", "")
+    monkeypatch.setattr(dbmod, "_ALLOW_SQLITE_IN_PROD", False)
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required in production"):
+        dbmod.require_production_store()
+    monkeypatch.setattr(dbmod, "_ALLOW_SQLITE_IN_PROD", True)
+    dbmod.require_production_store()
