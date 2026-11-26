@@ -492,7 +492,7 @@ def test_console_shows_trial_usage_meter_and_channel_prompt(api):
     assert "Upgrade" in response.text
 
 
-def test_soft_limit_never_blocks_and_dashboard_explains_grace(api, monkeypatch):
+def test_hard_quota_blocks_with_upgrade_metadata(api, monkeypatch):
     created = api.post("/v1/workspaces", data={"name": "Grace team"}, follow_redirects=False)
     code = created.headers["location"].rsplit("/", 1)[-1]
     main.get_plan(code)
@@ -508,11 +508,16 @@ def test_soft_limit_never_blocks_and_dashboard_explains_grace(api, monkeypatch):
         )
     monkeypatch.setattr(main, "monthly_usage", lambda org_id: 1_050)
 
-    still_works = api.post("/v1/requests", json=payload(agent="grace-agent-2", workspace=code))
-    assert still_works.status_code == 201
+    blocked = api.post("/v1/requests", json=payload(agent="grace-agent-2", workspace=code))
+    assert blocked.status_code == 402
+    detail = blocked.json()["detail"]
+    assert detail["code"] == "approval_quota_exceeded"
+    assert detail["current_tier"] == "free" and detail["required_tier"] == "plus"
+    assert detail["used"] == 1_050 and detail["limit"] == 1_000
+    assert f"org_id={code}" in detail["upgrade_url"]
 
     page = api.get(f"/w/{code}")
-    assert "Your live agents keep running" in page.text
+    assert "New approval requests are paused" in page.text
     assert "expire in 48 hours" in page.text
     assert "Connect Slack / SMS approvals" in page.text
 
@@ -1484,6 +1489,17 @@ def test_production_refuses_ephemeral_sqlite_without_postgres(monkeypatch):
     dbmod.require_production_store()
 
 
+def force_tier(code: str, tier: str) -> None:
+    main.get_plan(code)
+    with main.transaction() as conn:
+        conn.execute(
+            "UPDATE plans SET tier=?, status='active', trial_ends_at='', plan_expires_at='' "
+            "WHERE org_id=?",
+            (tier, code),
+        )
+        conn.execute("UPDATE organizations SET plan_tier=? WHERE id=?", (tier, code))
+
+
 def _magic_token(link: str) -> str:
     query = dict(parse_qsl(urlsplit(link).query))
     return query["token"]
@@ -1631,3 +1647,74 @@ def test_api_key_authenticates_protected_endpoints_and_rejects_invalid(api):
     with main.transaction() as conn:
         row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (body["id"],)).fetchone()
     assert row["revoked_at"]
+
+
+def test_rule_feature_gates_enforce_plus_and_pro(api):
+    ensure_workspace("ws_gates")
+    force_tier("ws_gates", "free")
+
+    blocked = api.post(
+        "/v1/rules",
+        json={"workspace": "ws_gates", "agent": "a", "action": "b", "max_amount": 10},
+    )
+    assert blocked.status_code == 403
+    detail = blocked.json()["detail"]
+    assert detail["code"] == "plan_upgrade_required"
+    assert detail["current_tier"] == "free" and detail["required_tier"] == "plus"
+    assert detail["feature"] == "conditional_auto_approve"
+
+    plain = api.post(
+        "/v1/rules", json={"workspace": "ws_gates", "agent": "a", "action": "b"}
+    )
+    assert plain.status_code == 201
+
+    force_tier("ws_gates", "plus")
+    allowed = api.post(
+        "/v1/rules",
+        json={"workspace": "ws_gates", "agent": "a", "action": "b", "max_amount": 10},
+    )
+    assert allowed.status_code == 201
+    routing = api.post(
+        "/v1/rules",
+        json={"workspace": "ws_gates", "agent": "a", "action": "b", "multi_approver": True},
+    )
+    assert routing.status_code == 403
+    assert routing.json()["detail"]["required_tier"] == "pro"
+
+    force_tier("ws_gates", "pro")
+    routed = api.post(
+        "/v1/rules",
+        json={"workspace": "ws_gates", "agent": "a", "action": "b", "multi_approver": True},
+    )
+    assert routed.status_code == 201 and routed.json()["multi_approver"] is True
+    listed = api.get("/v1/rules", params={"workspace": "ws_gates"})
+    assert listed.status_code == 200
+    assert all("claim_token" not in item for item in listed.json()["rules"])
+
+
+def test_channel_and_auto_rule_gates_enforce_tiers(api):
+    ensure_workspace("ws_channels")
+    force_tier("ws_channels", "free")
+    sms = api.post(
+        "/v1/requests", json=payload(agent="sms-agent", workspace="ws_channels", channel="sms")
+    )
+    assert sms.status_code == 403
+    assert sms.json()["detail"]["feature"] == "mobile_channels"
+    assert sms.json()["detail"]["required_tier"] == "pro"
+
+    force_tier("ws_channels", "plus")
+    slack = api.post(
+        "/v1/requests", json=payload(agent="slack-agent", workspace="ws_channels", channel="slack")
+    )
+    assert slack.status_code == 201
+
+    force_tier("ws_channels", "free")
+    body = create(api, agent="rule-agent", action="send_note", workspace="ws_channels")
+    with main.transaction() as conn:
+        row = conn.execute("SELECT token FROM requests WHERE id = ?", (body["id"],)).fetchone()
+    decision = api.post(
+        f"/a/{row['token']}/decide", data={"decision": "auto_rule"}, follow_redirects=False
+    )
+    assert decision.status_code == 403
+    assert decision.json()["detail"]["required_tier"] == "plus"
+

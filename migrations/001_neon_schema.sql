@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS auto_approve_rules (
     action TEXT NOT NULL,
     scope_json TEXT NOT NULL,
     max_amount REAL,
+    multi_approver INTEGER NOT NULL DEFAULT 0,
     claim_token TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,

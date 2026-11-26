@@ -347,6 +347,7 @@ def init_db() -> None:
                 action TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
                 max_amount REAL,
+                multi_approver INTEGER NOT NULL DEFAULT 0,
                 claim_token TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL,
@@ -354,6 +355,7 @@ def init_db() -> None:
             )
             """
         )
+        _ensure_column(conn, "auto_approve_rules", "multi_approver", "INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS magic_links (
@@ -635,6 +637,18 @@ class GatewayIn(BaseModel):
     default_action: str = Field(default="review", pattern="^(allow|review)$")
     ttl_minutes: int = Field(default=15, ge=1, le=720)
     parent_origin: str = Field(default="", max_length=200)
+
+
+class RuleIn(BaseModel):
+    """A standing auto-approval rule; conditional and routing locks are server-side."""
+
+    workspace: str = Field(default="public", max_length=60)
+    agent: str = Field(min_length=1, max_length=120)
+    action: str = Field(min_length=1, max_length=120)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    max_amount: float | None = Field(default=None, ge=0)
+    multi_approver: bool = False
+    claim_token: str = Field(default="", max_length=120)
 
 
 def clean(value: Any, limit: int = 200) -> str:
@@ -1063,6 +1077,95 @@ def plan_context(org_id: str | None, *, used: int | None = None) -> dict[str, An
         "usage": plans.usage_state(plan, count),
         "limits": plans.limits(current),
     }
+
+
+FEATURE_MIN_TIER = {
+    "conditional_auto_approve": "plus",
+    "instant_delivery": "plus",
+    "multi_approver_routing": "pro",
+    "mobile_channels": "pro",
+    "compliance_exports": "pro",
+    "white_label": "enterprise",
+    "sso_saml": "enterprise",
+    "siem_streaming": "enterprise",
+}
+CHANNEL_FEATURES = {
+    "slack": "instant_delivery",
+    "webhook": "instant_delivery",
+    "sms": "mobile_channels",
+    "whatsapp": "mobile_channels",
+}
+
+
+def upgrade_url(org: str, feature: str) -> str:
+    return "/pricing?" + urlencode({"org_id": org, "from": feature})
+
+
+def upgrade_detail(
+    feature: str,
+    current: str,
+    required: str,
+    org: str,
+    message: str,
+    status: int,
+) -> dict[str, Any]:
+    return {
+        "code": "plan_upgrade_required" if status == 403 else "approval_quota_exceeded",
+        "message": message,
+        "feature": feature,
+        "current_tier": current,
+        "required_tier": required,
+        "upgrade_url": upgrade_url(org, feature),
+    }
+
+
+def require_feature(org_id: str | None, feature: str) -> str:
+    """Hard 403 gate for Plus/Pro/Enterprise-only server features."""
+    org = safe_org_id(org_id)
+    current = plans.effective_tier(get_plan(org))
+    if plans.feature_locks(current).get(feature):
+        return current
+    required = FEATURE_MIN_TIER.get(feature, "plus")
+    raise HTTPException(
+        status_code=403,
+        detail=upgrade_detail(
+            feature,
+            current,
+            required,
+            org,
+            f"{feature.replace('_', ' ').title()} requires the {plans.tier(required).name} plan.",
+            403,
+        ),
+    )
+
+
+def require_request_quota(org_id: str | None) -> None:
+    """Hard 402 gate once the current monthly approval quota is spent."""
+    org = safe_org_id(org_id)
+    usage = plans.usage_state(get_plan(org), monthly_usage(org))
+    limit = usage["limit"]
+    if limit is None or usage["used"] < limit:
+        return
+    detail = upgrade_detail(
+        "approval_quota",
+        usage["tier"],
+        "plus",
+        org,
+        f"Monthly approval quota of {limit} reached. Upgrade to continue.",
+        402,
+    )
+    detail.update({"used": usage["used"], "limit": limit})
+    raise HTTPException(status_code=402, detail=detail)
+
+
+def enforce_request_gates(payload: RequestIn) -> None:
+    """Single server-side choke point shared by every request-creating API."""
+    org = safe_org_id(payload.workspace)
+    channel = str(payload.channel or "").strip().lower()
+    feature = CHANNEL_FEATURES.get(channel)
+    if feature:
+        require_feature(org, feature)
+    require_request_quota(org)
 
 
 def apply_billing_event(action: dict[str, str]) -> bool:
@@ -1504,6 +1607,7 @@ def a2a_needs_approval(task: str, payload: dict[str, Any]) -> bool:
 
 
 def create_request(payload: RequestIn, *, gateway_hash: str = "") -> dict[str, str]:
+    enforce_request_gates(payload)
     scope_json, scope_hash = canonical_scope(payload.scope)
     request_id = "req_" + new_code(9)
     token = new_code(24)
@@ -2234,8 +2338,8 @@ def plan_banners_html(context: dict[str, Any], rows: list[sqlite3.Row]) -> str:
 
     if usage["state"] == "over":
         banners.append(
-            f'<div class="banner warn">You crossed the monthly approval limit. '
-            f'<strong>Your live agents keep running</strong>. Add a card within 72 hours to keep audit receipts active. '
+            f'<div class="banner warn">Monthly approval limit reached. '
+            f'<strong>New approval requests are paused</strong> until you upgrade or the quota resets. '
             f'<a href="/pricing?{query}">Move to Plus</a>.</div>'
         )
     elif usage["state"] == "near":
@@ -3241,6 +3345,76 @@ async def revoke_api_key_form(http_request: Request, key_id: str) -> RedirectRes
             (iso(), key_id[:120], principal["org_id"]),
         )
     return RedirectResponse(f"/w/{principal['org_id']}", status_code=303)
+
+
+def rule_public(row: Any) -> dict[str, Any]:
+    """Rule metadata only — never expose a claim capability token."""
+    return {
+        "id": str(row["id"]),
+        "org_id": str(row["org_id"]),
+        "agent": str(row["agent"]),
+        "action": str(row["action"]),
+        "max_amount": row["max_amount"],
+        "multi_approver": bool(row["multi_approver"]),
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
+@app.get("/v1/rules")
+async def list_rules(http_request: Request, workspace: str = "public") -> JSONResponse:
+    validate_bearer_if_present(http_request)
+    org = safe_org_id(workspace)
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM auto_approve_rules WHERE org_id = ? ORDER BY created_at DESC LIMIT 50",
+            (org,),
+        ).fetchall()
+    return JSONResponse({"rules": [rule_public(row) for row in rows]})
+
+
+@app.post("/v1/rules")
+async def create_rule(body: RuleIn, http_request: Request) -> JSONResponse:
+    validate_bearer_if_present(http_request)
+    org = safe_org_id(body.workspace)
+    if body.multi_approver:
+        require_feature(org, "multi_approver_routing")
+    if body.max_amount is not None or body.scope:
+        require_feature(org, "conditional_auto_approve")
+    scope_json, _ = canonical_scope(body.scope)
+    rule_id = "rule_" + new_code(12)
+    created = iso()
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO auto_approve_rules (id, org_id, user_id, agent, action, scope_json, "
+            "max_amount, multi_approver, claim_token, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+            (
+                rule_id,
+                org,
+                "",
+                body.agent.strip()[:120],
+                body.action.strip()[:120],
+                scope_json,
+                body.max_amount,
+                1 if body.multi_approver else 0,
+                str(body.claim_token or "")[:120] or None,
+                created,
+            ),
+        )
+    return JSONResponse(
+        status_code=201,
+        content={
+            "id": rule_id,
+            "org_id": org,
+            "agent": body.agent.strip()[:120],
+            "action": body.action.strip()[:120],
+            "multi_approver": bool(body.multi_approver),
+            "max_amount": body.max_amount,
+            "status": "active",
+            "created_at": created,
+        },
+    )
 
 
 @app.get("/docs", response_class=HTMLResponse)
@@ -4391,6 +4565,9 @@ async def decide(
         raise HTTPException(status_code=404, detail="Approval link not found.")
     if expired(row):
         raise HTTPException(status_code=410, detail="This request has expired.")
+    if decision == "auto_rule":
+        # The UI labels this Plus; the server enforces the same lock.
+        require_feature(str(row["workspace"]), "conditional_auto_approve")
     if not decide_request(row, decision):
         # A concurrent or repeated decision already won; never overwrite the
         # decided snapshot or the signed permission with a second choice.
