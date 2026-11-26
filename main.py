@@ -2362,6 +2362,107 @@ def link_claim_rules(conn: Any, claim_token: str, user_id: str) -> int:
     return int(cursor.rowcount)
 
 
+API_KEY_PREFIX = "gr_live_"
+
+
+def bearer_value(authorization: str) -> str:
+    """Extract a bearer credential without accepting arbitrary schemes."""
+    match = re.match(r"^Bearer\s+(.+)$", str(authorization or "").strip(), re.IGNORECASE)
+    if not match:
+        return ""
+    token = match.group(1).strip()
+    return token[:200] if len(token) <= 200 else ""
+
+
+def api_key_principal(token: str) -> dict[str, Any] | None:
+    """Resolve a live ``gr_live_`` key. Only its SHA-256 digest is persisted."""
+    candidate = str(token or "").strip()
+    if not candidate.startswith(API_KEY_PREFIX) or len(candidate) < 24:
+        return None
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL",
+            (hash_token(candidate),),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (iso(), row["id"]))
+    return {
+        "org_id": str(row["org_id"]),
+        "user_id": str(row["user_id"]),
+        "key_id": str(row["id"]),
+        "kind": "api_key",
+    }
+
+
+def principal_from_request(http_request: Request) -> dict[str, Any] | None:
+    """A signed session, a live API key, or the dashboard capability cookie."""
+    token = bearer_value(http_request.headers.get("authorization", ""))
+    if token:
+        return api_key_principal(token)
+    identity = session_identity(http_request)
+    if identity:
+        return {**identity, "kind": "session"}
+    code = dashboard_code_from_cookie(http_request.cookies.get(DASHBOARD_COOKIE, ""))
+    if code and get_workspace(code):
+        return {"org_id": code, "user_id": "", "kind": "capability"}
+    return None
+
+
+def require_user_principal(http_request: Request) -> dict[str, Any]:
+    principal = principal_from_request(http_request)
+    if not principal or not principal.get("user_id"):
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in with an email link or provide a valid API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return principal
+
+
+def validate_bearer_if_present(http_request: Request) -> dict[str, Any] | None:
+    """Zero-install callers may omit credentials; supplied keys must be live."""
+    header = str(http_request.headers.get("authorization", "")).strip()
+    if not header:
+        return None
+    principal = api_key_principal(bearer_value(header))
+    if not principal:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or revoked API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return principal
+
+
+def mint_api_key(conn: Any, org: str, user_id: str, name: str) -> tuple[dict[str, Any], str]:
+    raw = API_KEY_PREFIX + secrets.token_urlsafe(24)
+    key_id = "key_" + new_code(12)
+    created = iso()
+    label = str(name or "").strip()[:60] or "Grant API key"
+    prefix = raw[: len(API_KEY_PREFIX) + 8]
+    conn.execute(
+        "INSERT INTO api_keys (id, org_id, user_id, name, key_hash, key_prefix, created_at, "
+        "last_used_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+        (key_id, org, user_id, label, hash_token(raw), prefix, created),
+    )
+    return (
+        {"id": key_id, "org_id": org, "name": label, "key_prefix": prefix, "created_at": created},
+        raw,
+    )
+
+
+def api_key_public(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "key_prefix": str(row["key_prefix"]),
+        "created_at": str(row["created_at"]),
+        "last_used_at": str(row["last_used_at"] or ""),
+        "revoked_at": str(row["revoked_at"] or ""),
+    }
+
+
 def signin_page(next_path: str = "/pricing", error: bool = False) -> str:
     target = html.escape(safe_next_path(next_path), quote=True)
     start_href = html.escape(f"/start?{urlencode({'next': safe_next_path(next_path)})}", quote=True)
@@ -2473,6 +2574,29 @@ def workspace_page(
   </form>
 </section>
 """
+    with closing(db()) as conn:
+        key_rows = conn.execute(
+            "SELECT * FROM api_keys WHERE org_id = ? ORDER BY created_at DESC LIMIT 20", (code,)
+        ).fetchall()
+    live_keys = [row for row in key_rows if not row["revoked_at"]]
+    key_items = "".join(
+        f'<p class="sub"><code>{html.escape(str(row["key_prefix"]), quote=True)}</code> '
+        f'{html.escape(str(row["name"]), quote=True)} '
+        f'<form method="post" action="/api/keys/{html.escape(str(row["id"]), quote=True)}/revoke" style="display:inline">'
+        f'<button class="btn ghost mini" type="submit">Revoke</button></form></p>'
+        for row in live_keys
+    ) or '<p class="sub">No live API keys yet.</p>'
+    api_keys_section = f"""
+<section class="section glass">
+  <h2>API keys <span class="eyebrow">gr_live_…</span></h2>
+  <p class="sub">Mint a real key for programmatic agents. The raw key is shown once; Grant stores only its SHA-256 hash. An email sign-in is required.</p>
+  <form method="post" action="/api/keys" class="form-row">
+    <input type="text" name="name" maxlength="60" placeholder="Key name (e.g. production agent)">
+    <button class="btn mini" type="submit">Get Your Free API Key →</button>
+  </form>
+  {key_items}
+</section>
+"""
     body = header() + f"""
 <section class="section glass">
   <span class="eyebrow"><span class="dot"></span> Workspace</span>
@@ -2492,6 +2616,7 @@ def workspace_page(
   <div class="actions"><button class="btn ghost mini" type="button" onclick="copyText({js_literal(snippet)})">Copy snippet</button><a class="btn ghost mini" href="/protected/{code}">Protected by Grant</a><a class="btn ghost mini" href="/pricing?{query}">Guardrails & plans</a></div>
 </section>
 {account_section}
+{api_keys_section}
 {billing_form}
 <section class="section glass"><h2>Requests</h2><table class="table"><thead><tr><th>ID</th><th>Agent</th><th>Action</th><th>Status</th><th>Decision</th></tr></thead><tbody>{request_rows}</tbody></table></section>
 <section class="section glass"><h2>Standing permissions</h2><table class="table"><thead><tr><th>Agent</th><th>Action</th><th>Policy</th><th>Expires</th></tr></thead><tbody>{perm_rows}</tbody></table></section>
@@ -2916,7 +3041,7 @@ async def signin_submit(
     )
 
 
-async def _magic_link_fields(http_request: Request) -> dict[str, Any]:
+async def _request_fields(http_request: Request) -> dict[str, Any]:
     content_type = http_request.headers.get("content-type", "")
     if "application/json" in content_type:
         try:
@@ -2932,7 +3057,7 @@ async def _magic_link_fields(http_request: Request) -> dict[str, Any]:
 async def send_magic_link(http_request: Request) -> Response:
     if rate_limited(http_request):
         raise HTTPException(status_code=429, detail="Too many sign-in links. Slow down.")
-    data = await _magic_link_fields(http_request)
+    data = await _request_fields(http_request)
     email = normalize_billing_email(data.get("email", ""))
     if not valid_email(email):
         raise HTTPException(status_code=400, detail="Enter a valid email address.")
@@ -3026,6 +3151,96 @@ async def verify_magic_link(
         path="/",
     )
     return response
+
+
+@app.get("/api/keys")
+async def list_api_keys(http_request: Request) -> JSONResponse:
+    """List live key metadata. Raw key material is never stored or returned."""
+    principal = require_user_principal(http_request)
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM api_keys WHERE org_id = ? ORDER BY created_at DESC LIMIT 50",
+            (principal["org_id"],),
+        ).fetchall()
+    return JSONResponse({"keys": [api_key_public(row) for row in rows]})
+
+
+@app.post("/api/keys")
+async def create_api_key(http_request: Request) -> Response:
+    is_json = "application/json" in http_request.headers.get("content-type", "")
+    principal = principal_from_request(http_request)
+    if not principal or not principal.get("user_id"):
+        if is_json:
+            raise HTTPException(
+                status_code=401,
+                detail="Sign in with an email link or provide a valid API key.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        target = f"/w/{principal['org_id']}" if principal and principal.get("org_id") else "/pricing"
+        return RedirectResponse(f"/signin?{urlencode({'next': target})}", status_code=303)
+
+    data = await _request_fields(http_request)
+    name = str(data.get("name", "")).strip()[:60] or "Grant API key"
+    with transaction() as conn:
+        meta, raw = mint_api_key(conn, principal["org_id"], principal["user_id"], name)
+
+    if is_json:
+        return JSONResponse(
+            status_code=201,
+            content={
+                **meta,
+                "key": raw,
+                "warning": "Store this key now. Grant stores only its SHA-256 hash.",
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+    escaped = html.escape(raw, quote=True)
+    org = html.escape(principal["org_id"], quote=True)
+    body = header() + f"""
+<section class="done glass">
+  <div class="seal">✓</div>
+  <h1>Save your Grant API key.</h1>
+  <p class="lede">This is the only time we will show it. Copy it into your agent's environment now.</p>
+  <pre><code id="grant-api-key">{escaped}</code></pre>
+  <div class="actions">
+    <button class="btn mini" type="button" onclick="copyText({js_literal(raw)})">Copy key</button>
+    <a class="btn ghost mini" href="/w/{org}">Back to workspace</a>
+  </div>
+  <p class="alert">Grant stores only a SHA-256 digest. Send it as <code>Authorization: Bearer {API_KEY_PREFIX}…</code>.</p>
+</section>
+"""
+    return HTMLResponse(
+        page("Your new Grant API key", body, "Save your one-time Grant API key.", private=True),
+        status_code=201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete("/api/keys/{key_id}")
+async def revoke_api_key(http_request: Request, key_id: str) -> JSONResponse:
+    principal = require_user_principal(http_request)
+    with transaction() as conn:
+        cursor = conn.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND org_id = ? AND revoked_at IS NULL",
+            (iso(), key_id[:120], principal["org_id"]),
+        )
+        revoked = int(cursor.rowcount) == 1
+    if not revoked:
+        raise HTTPException(status_code=404, detail="API key not found.")
+    return JSONResponse({"ok": True, "id": key_id[:120], "revoked": True})
+
+
+@app.post("/api/keys/{key_id}/revoke")
+async def revoke_api_key_form(http_request: Request, key_id: str) -> RedirectResponse:
+    principal = principal_from_request(http_request)
+    if not principal or not principal.get("user_id"):
+        return RedirectResponse("/signin", status_code=303)
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND org_id = ? AND revoked_at IS NULL",
+            (iso(), key_id[:120], principal["org_id"]),
+        )
+    return RedirectResponse(f"/w/{principal['org_id']}", status_code=303)
 
 
 @app.get("/docs", response_class=HTMLResponse)
@@ -3501,8 +3716,9 @@ async def stats_json() -> JSONResponse:
 
 
 @app.post("/v1/a2a/gate")
-async def a2a_gate(body: A2AGateIn) -> JSONResponse:
+async def a2a_gate(body: A2AGateIn, http_request: Request) -> JSONResponse:
     """Layer 4: halt an agent-to-agent handoff until a human signs it."""
+    validate_bearer_if_present(http_request)
     if not body.require_approval and not a2a_needs_approval(body.task, body.payload):
         return JSONResponse(
             {
@@ -3552,6 +3768,7 @@ async def create_request_api(
 ) -> JSONResponse:
     if rate_limited(http_request):
         raise HTTPException(status_code=429, detail="Too many requests. Slow down.")
+    validate_bearer_if_present(http_request)
 
     key = idempotency_key[:120] if idempotency_key else ""
     owner = False

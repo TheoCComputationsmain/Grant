@@ -10,6 +10,7 @@ import tempfile
 import time
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -1566,3 +1567,67 @@ def test_magic_link_links_anonymous_claim_rules(api):
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     assert rule["user_id"] == user["id"]
     assert rule["linked_at"]
+
+
+@contextmanager
+def _signed_in(api, email: str):
+    """Temporarily attach a magic-link session to the shared test client."""
+    previous = dict(api.cookies)
+    link = api.post("/v1/auth/magic-link", json={"email": email}).json()["dev_link"]
+    verified = api.get(link, follow_redirects=False)
+    api.cookies.set(main.SESSION_COOKIE, verified.cookies[main.SESSION_COOKIE])
+    try:
+        yield
+    finally:
+        api.cookies.clear()
+        api.cookies.update(previous)
+
+
+def test_api_key_mint_stores_only_digest_and_lists_metadata(api):
+    with _signed_in(api, "key-mint@example.test"):
+        created = api.post("/api/keys", json={"name": "ci agent"})
+        assert created.status_code == 201
+        body = created.json()
+        raw = body["key"]
+        assert raw.startswith("gr_live_") and len(raw) > 24
+        assert body["key_prefix"] in raw
+
+        with main.transaction() as conn:
+            row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (body["id"],)).fetchone()
+        assert row["key_hash"] == main.hash_token(raw)
+        assert raw not in str(dict(row))
+        assert row["user_id"] and row["org_id"] == body["org_id"]
+
+        listed = api.get("/api/keys")
+        assert listed.status_code == 200
+        keys = listed.json()["keys"]
+        assert any(item["id"] == body["id"] for item in keys)
+        assert all("key" not in item and "key_hash" not in item for item in keys)
+
+
+def test_api_key_authenticates_protected_endpoints_and_rejects_invalid(api):
+    with _signed_in(api, "key-auth@example.test"):
+        body = api.post("/api/keys", json={"name": "agent"}).json()
+    raw = body["key"]
+    auth = {"Authorization": f"Bearer {raw}"}
+
+    assert api.get("/api/keys", headers=auth).status_code == 200
+    created = api.post(
+        "/v1/requests",
+        json=payload(agent="bearer-agent", action="send_note", workspace=body["org_id"]),
+        headers=auth,
+    )
+    assert created.status_code == 201
+    assert api.post("/v1/a2a/gate", json={"sender": "a", "receiver": "b", "task": "pay"}, headers=auth).status_code in {200, 202}
+
+    bad = {"Authorization": "Bearer gr_live_not_a_real_key_000000"}
+    assert api.get("/api/keys", headers=bad).status_code == 401
+    assert api.post("/v1/requests", json=payload(), headers=bad).status_code == 401
+
+    revoked = api.delete(f"/api/keys/{body['id']}", headers=auth)
+    assert revoked.status_code == 200 and revoked.json()["revoked"] is True
+    assert api.get("/api/keys", headers=auth).status_code == 401
+
+    with main.transaction() as conn:
+        row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (body["id"],)).fetchone()
+    assert row["revoked_at"]
