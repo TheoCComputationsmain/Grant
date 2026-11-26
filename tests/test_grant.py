@@ -1481,3 +1481,88 @@ def test_production_refuses_ephemeral_sqlite_without_postgres(monkeypatch):
         dbmod.require_production_store()
     monkeypatch.setattr(dbmod, "_ALLOW_SQLITE_IN_PROD", True)
     dbmod.require_production_store()
+
+
+def _magic_token(link: str) -> str:
+    query = dict(parse_qsl(urlsplit(link).query))
+    return query["token"]
+
+
+def test_magic_link_send_stores_only_digest_and_exposes_dev_link(api):
+    email = "magic-send@example.test"
+    response = api.post("/v1/auth/magic-link", json={"email": email})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["delivery"] == "console"
+    link = body["dev_link"]
+    assert link.startswith("https://grant.test/auth/verify?")
+    raw = _magic_token(link)
+
+    with main.transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM magic_links WHERE email = ? ORDER BY created_at DESC LIMIT 1", (email,)
+        ).fetchone()
+    assert row is not None
+    assert row["token_hash"] == main.hash_token(raw)
+    assert raw not in str(dict(row))
+
+
+def test_magic_link_verify_creates_user_session_and_login_history(api):
+    email = "magic-verify@example.test"
+    link = api.post("/v1/auth/magic-link", json={"email": email}).json()["dev_link"]
+    with main.transaction() as conn:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM login_history WHERE source = 'magic_link'"
+        ).fetchone()[0]
+
+    verified = api.get(link, follow_redirects=False)
+    assert verified.status_code == 303
+    assert verified.headers["location"].startswith("/w/")
+    assert main.SESSION_COOKIE in verified.cookies
+
+    with main.transaction() as conn:
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        session = conn.execute(
+            "SELECT * FROM auth_sessions WHERE id = ?",
+            (verified.cookies[main.SESSION_COOKIE],),
+        ).fetchone()
+        after = conn.execute(
+            "SELECT COUNT(*) FROM login_history WHERE source = 'magic_link'"
+        ).fetchone()[0]
+    assert user is not None and user["last_login_at"]
+    assert session is not None and session["user_id"] == user["id"]
+    assert session["org_id"] and session["expires_at"]
+    assert after == before + 1
+
+
+def test_magic_link_is_one_time_only(api):
+    email = "magic-once@example.test"
+    link = api.post("/v1/auth/magic-link", json={"email": email}).json()["dev_link"]
+    assert api.get(link, follow_redirects=False).status_code == 303
+    replay = api.get(link, follow_redirects=False)
+    assert replay.status_code == 400
+    assert "invalid or expired" in replay.json()["detail"]
+
+
+def test_magic_link_links_anonymous_claim_rules(api):
+    email = "magic-claim@example.test"
+    claim = "claim_" + main.new_code(8)
+    with main.transaction() as conn:
+        conn.execute(
+            "INSERT INTO auto_approve_rules (id, org_id, user_id, agent, action, scope_json, "
+            "claim_token, status, created_at) VALUES (?, ?, '', 'a', 'b', '{}', ?, 'active', ?)",
+            ("rule_" + main.new_code(8), "ws_claim", claim, main.iso()),
+        )
+    link = api.post(
+        "/v1/auth/magic-link", json={"email": email, "claim_token": claim}
+    ).json()["dev_link"]
+    assert api.get(link, follow_redirects=False).status_code == 303
+
+    with main.transaction() as conn:
+        rule = conn.execute(
+            "SELECT * FROM auto_approve_rules WHERE claim_token = ?", (claim,)
+        ).fetchone()
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    assert rule["user_id"] == user["id"]
+    assert rule["linked_at"]

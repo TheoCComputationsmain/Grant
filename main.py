@@ -30,7 +30,16 @@ from fastapi import FastAPI, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
-from grant import billing, cashfree, db as dbmod, login_library, plans, policies, telemetry
+from grant import (
+    billing,
+    cashfree,
+    db as dbmod,
+    emailer,
+    login_library,
+    plans,
+    policies,
+    telemetry,
+)
 
 APP_ENV = os.environ.get("GRANT_APP_ENV", "development").strip().lower()
 DB_PATH = Path(os.environ.get("GRANT_DB", Path(__file__).resolve().parent / "grant.db"))
@@ -40,6 +49,9 @@ GATEWAY_WAIT_SECONDS = max(0, min(45, int(os.environ.get("GRANT_GATEWAY_WAIT_SEC
 ALLOW_HTTP_UPSTREAMS = os.environ.get("GRANT_ALLOW_HTTP_UPSTREAMS", "").strip().lower() in {"1", "true", "yes"}
 BLOB_PREFIX = os.environ.get("GRANT_BLOB_PREFIX", "grant-state").strip("/") or "grant-state"
 _SIGNING_SECRET = os.environ.get("GRANT_SIGNING_SECRET", "").strip()
+MAGIC_LINK_TTL_MINUTES = max(1, min(1440, int(os.environ.get("GRANT_MAGIC_LINK_TTL_MINUTES", "30"))))
+SESSION_DAYS = max(1, min(365, int(os.environ.get("GRANT_SESSION_DAYS", "30"))))
+SESSION_COOKIE = "grant_session"
 BILLING_WEBHOOK_SECRET = os.environ.get(billing.WEBHOOK_SECRET_ENV_KEY, "").strip()
 CASHFREE_WEBHOOK_SECRET = (
     os.environ.get(cashfree.WEBHOOK_SECRET_ENV_KEY, "").strip()
@@ -2276,6 +2288,80 @@ def dashboard_code_from_cookie(value: str) -> str:
     return code
 
 
+def hash_token(value: str) -> str:
+    """Deterministic token digest. Only digests are stored."""
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def valid_email(value: str) -> bool:
+    candidate = str(value or "").strip()
+    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", candidate)) and len(candidate) <= 254
+
+
+def find_or_create_user(conn: Any, email: str) -> dict[str, Any]:
+    normalized = normalize_billing_email(email)
+    row = conn.execute("SELECT * FROM users WHERE email = ?", (normalized,)).fetchone()
+    if row:
+        return dict(row)
+    user = {"id": "usr_" + new_code(12), "email": normalized, "created_at": iso()}
+    conn.execute(
+        "INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)",
+        (user["id"], user["email"], user["created_at"]),
+    )
+    return user
+
+
+def create_session(conn: Any, user_id: str, org: str, email: str) -> str:
+    session_id = "ses_" + new_code(18)
+    conn.execute(
+        "INSERT INTO auth_sessions (id, user_id, org_id, email, expires_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            user_id,
+            org,
+            normalize_billing_email(email) or None,
+            iso_plus(SESSION_DAYS * 24 * 60),
+            iso(),
+        ),
+    )
+    return session_id
+
+
+def session_identity(http_request: Request) -> dict[str, Any] | None:
+    session_id = str(http_request.cookies.get(SESSION_COOKIE, ""))[:120]
+    if not session_id:
+        return None
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT s.*, u.email AS account_email FROM auth_sessions s "
+            "LEFT JOIN users u ON u.id = s.user_id "
+            "WHERE s.id = ? AND s.expires_at >= ?",
+            (session_id, iso()),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": session_id,
+        "user_id": str(row["user_id"]),
+        "email": str(row["account_email"] or row["email"] or ""),
+        "org_id": str(row["org_id"]),
+    }
+
+
+def link_claim_rules(conn: Any, claim_token: str, user_id: str) -> int:
+    """Attach rules created anonymously before the human signed in."""
+    token = str(claim_token or "")[:120]
+    if not token:
+        return 0
+    cursor = conn.execute(
+        "UPDATE auto_approve_rules SET user_id = ?, linked_at = ? "
+        "WHERE claim_token = ? AND (user_id IS NULL OR user_id = '')",
+        (user_id, iso(), token),
+    )
+    return int(cursor.rowcount)
+
+
 def signin_page(next_path: str = "/pricing", error: bool = False) -> str:
     target = html.escape(safe_next_path(next_path), quote=True)
     start_href = html.escape(f"/start?{urlencode({'next': safe_next_path(next_path)})}", quote=True)
@@ -2296,7 +2382,16 @@ def signin_page(next_path: str = "/pricing", error: bool = False) -> str:
     <input class="field" id="signin-code" name="code" placeholder="Your workspace code" maxlength="60" required>
     <div class="decision"><button class="btn" type="submit">Sign in</button><a class="btn ghost" href="{start_href}">Create a workspace</a></div>
   </form>
-  <p class="alert">Grant does not use passwords. Keep your workspace link private.</p>
+  <details class="claim" style="margin-top:18px">
+    <summary>Or sign in with an email link</summary>
+    <form method="post" action="/v1/auth/magic-link" class="stack-form">
+      <input type="hidden" name="next" value="{target}">
+      <label for="signin-email">Email address</label>
+      <input class="field" id="signin-email" type="email" name="email" maxlength="254" placeholder="you@example.com" required>
+      <div class="decision"><button class="btn mini" type="submit">Email me a sign-in link</button></div>
+    </form>
+  </details>
+  <p class="alert">Grant does not use passwords. Your workspace link stays private; email links work once.</p>
 </section>
 """
     return page("Sign in — Grant", body, "Sign in to your Grant workspace.", private=True)
@@ -2330,6 +2425,7 @@ def workspace_page(
     *,
     context: dict[str, Any] | None = None,
     billing_email: str = "",
+    claim_token: str = "",
 ) -> str:
     label = clean(workspace_row["name"] if workspace_row else fallback_name, 80) or "My agents"
     code = clean(workspace_row["code"] if workspace_row else code, 60)
@@ -2365,6 +2461,18 @@ def workspace_page(
   </details>
 </section>
 """
+    account_section = f"""
+<section class="section glass">
+  <h2>Your account <span class="eyebrow">passwordless</span></h2>
+  <p class="sub">Email yourself a one-time sign-in link. This keeps your approvals tied to a real user, not just a bookmark.</p>
+  <form method="post" action="/v1/auth/magic-link" class="form-row">
+    <input type="hidden" name="org_id" value="{html.escape(code, quote=True)}">
+    <input type="hidden" name="claim_token" value="{html.escape(claim_token, quote=True)}">
+    <input type="email" name="email" maxlength="254" required placeholder="you@example.com" value="{html.escape(billing_email, quote=True)}">
+    <button class="btn mini" type="submit">Send sign-in link</button>
+  </form>
+</section>
+"""
     body = header() + f"""
 <section class="section glass">
   <span class="eyebrow"><span class="dot"></span> Workspace</span>
@@ -2383,6 +2491,7 @@ def workspace_page(
   <pre><code>{html.escape(snippet)}</code></pre>
   <div class="actions"><button class="btn ghost mini" type="button" onclick="copyText({js_literal(snippet)})">Copy snippet</button><a class="btn ghost mini" href="/protected/{code}">Protected by Grant</a><a class="btn ghost mini" href="/pricing?{query}">Guardrails & plans</a></div>
 </section>
+{account_section}
 {billing_form}
 <section class="section glass"><h2>Requests</h2><table class="table"><thead><tr><th>ID</th><th>Agent</th><th>Action</th><th>Status</th><th>Decision</th></tr></thead><tbody>{request_rows}</tbody></table></section>
 <section class="section glass"><h2>Standing permissions</h2><table class="table"><thead><tr><th>Agent</th><th>Action</th><th>Policy</th><th>Expires</th></tr></thead><tbody>{perm_rows}</tbody></table></section>
@@ -2805,6 +2914,118 @@ async def signin_submit(
     return RedirectResponse(
         f"/signin?{urlencode({'next': target, 'error': 1})}", status_code=303
     )
+
+
+async def _magic_link_fields(http_request: Request) -> dict[str, Any]:
+    content_type = http_request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            value = await http_request.json()
+            return value if isinstance(value, dict) else {}
+        except (ValueError, json.JSONDecodeError):
+            return {}
+    form = await http_request.form()
+    return dict(form)
+
+
+@app.post("/v1/auth/magic-link")
+async def send_magic_link(http_request: Request) -> Response:
+    if rate_limited(http_request):
+        raise HTTPException(status_code=429, detail="Too many sign-in links. Slow down.")
+    data = await _magic_link_fields(http_request)
+    email = normalize_billing_email(data.get("email", ""))
+    if not valid_email(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    org = billing.safe_org_id(data.get("org_id", "")) or ""
+    claim = str(data.get("claim_token", ""))[:120]
+    next_path = safe_next_path(str(data.get("next", ""))) if data.get("next") else ""
+    raw = "ml_" + new_code(24)
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO magic_links (token_hash, email, org_id, claim_token, expires_at, "
+            "used_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (
+                hash_token(raw),
+                email,
+                org or None,
+                claim or None,
+                iso_plus(MAGIC_LINK_TTL_MINUTES),
+                iso(),
+            ),
+        )
+    base = PUBLIC_BASE_URL or str(http_request.base_url).rstrip("/")
+    query = {"token": raw}
+    if next_path:
+        query["next"] = next_path
+    link = f"{base}/auth/verify?{urlencode(query)}"
+    try:
+        provider = emailer.send_magic_link(email, link, env=os.environ)
+    except emailer.EmailError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+    if "application/json" in http_request.headers.get("content-type", ""):
+        result: dict[str, Any] = {"ok": True, "delivery": provider}
+        if provider == "console":
+            result["dev_link"] = link
+        return JSONResponse(result)
+    message = "Check your email for a one-time Grant sign-in link."
+    dev = f'<p class="sub"><a href="{html.escape(link, quote=True)}">Open the development link</a></p>' if provider == "console" else ""
+    body = header() + f"""<section class="done glass"><div class="seal">✓</div>
+<h1>Sign-in link sent.</h1><p class="lede">{message}</p>{dev}
+<p class="sub">The link expires in {MAGIC_LINK_TTL_MINUTES} minutes and works once.</p></section>"""
+    return HTMLResponse(page("Sign-in link sent — Grant", body, "Check your email for your Grant sign-in link.", private=True))
+
+
+@app.get("/auth/verify")
+async def verify_magic_link(
+    http_request: Request, token: str = "", next: str = ""
+) -> RedirectResponse:
+    if rate_limited(http_request):
+        raise HTTPException(status_code=429, detail="Too many attempts. Slow down.")
+    raw = str(token or "")[:120]
+    if not raw:
+        raise HTTPException(status_code=400, detail="Sign-in link is missing.")
+    digest = hash_token(raw)
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM magic_links WHERE token_hash = ? AND used_at IS NULL AND expires_at >= ?",
+            (digest, iso()),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="This sign-in link is invalid or expired.")
+        conn.execute("UPDATE magic_links SET used_at = ? WHERE token_hash = ?", (iso(), digest))
+        user = find_or_create_user(conn, str(row["email"]))
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (iso(), user["id"]))
+        org = billing.safe_org_id(row["org_id"]) or ""
+        existing = conn.execute("SELECT 1 FROM workspaces WHERE code = ?", (org,)).fetchone() if org else None
+        if not existing:
+            org = "ws_" + new_code(9)
+            create_org_record(conn, org, "My agents", user["id"])
+        else:
+            conn.execute(
+                "UPDATE organizations SET owner_user_id = ? WHERE id = ? "
+                "AND (owner_user_id IS NULL OR owner_user_id = '')",
+                (user["id"], org),
+            )
+        link_claim_rules(conn, str(row["claim_token"] or ""), user["id"])
+        session_id = create_session(conn, user["id"], org, str(row["email"]))
+    telemetry.record_login(
+        http_request, subject=user["id"], email=str(row["email"]), source="magic_link"
+    )
+    target = safe_next_path(next) if next else ""
+    if not target or target == "/pricing" or not target.startswith("/"):
+        target = f"/w/{org}"
+    response = RedirectResponse(target, status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        max_age=SESSION_DAYS * 24 * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=http_request.url.scheme == "https",
+        path="/",
+    )
+    return response
 
 
 @app.get("/docs", response_class=HTMLResponse)
@@ -3875,6 +4096,7 @@ async def workspace(http_request: Request, code: str, name: str = "My agents") -
             rows,
             perms,
             billing_email=get_billing_email(code),
+            claim_token=http_request.cookies.get(DASHBOARD_COOKIE, ""),
         )
     )
 
