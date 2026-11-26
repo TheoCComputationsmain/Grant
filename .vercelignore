@@ -1,0 +1,12 @@
+.env*
+*.db
+*.db-wal
+*.db-shm
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+tests/
+.publish_assets/

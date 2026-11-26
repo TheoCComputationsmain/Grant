@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "name": "Grant OAuth scope policy templates",
+  "custody": "zero-custody: Grant stores no OAuth access tokens, refresh tokens, authorization codes, or provider secrets",
+  "usage": "Map a standard OAuth scope to a Grant gateway policy; the OAuth provider still performs sign-in and token issuance, Grant only gates the per-action tool call.",
+  "templates": {
+    "gmail.send": {
+      "provider": "google",
+      "risk": "high",
+      "tool": "send_email",
+      "action": "send_email",
+      "summary": "An agent wants to send email from the connected Google account.",
+      "scope": {"provider": "google", "scopes": ["gmail.send"], "capability": "send"},
+      "sensitive_tools": ["send_email", "gmail.send"],
+      "body_keys": ["recipient", "to", "subject", "body"],
+      "decision_hint": "require_human"
+    },
+    "gmail.readonly": {
+      "provider": "google",
+      "risk": "low",
+      "tool": "read_email",
+      "action": "read_email",
+      "summary": "An agent wants to read email from the connected Google account.",
+      "scope": {"provider": "google", "scopes": ["gmail.readonly"], "capability": "read"},
+      "sensitive_tools": [],
+      "body_keys": [],
+      "decision_hint": "review_once"
+    },
+    "gmail.modify": {
+      "provider": "google",
+      "risk": "high",
+      "tool": "modify_email",
+      "action": "modify_email",
+      "summary": "An agent wants to change labels or delete email in the connected Google account.",
+      "scope": {"provider": "google", "scopes": ["gmail.modify"], "capability": "modify"},
+      "sensitive_tools": ["modify_email", "delete_email", "gmail.modify"],
+      "body_keys": ["message_id", "label", "delete"],
+      "decision_hint": "require_human"
+    },
+    "drive.file": {
+      "provider": "google",
+      "risk": "medium",
+      "tool": "write_drive_file",
+      "action": "write_drive_file",
+      "summary": "An agent wants to create or edit a Drive file.",
+      "scope": {"provider": "google", "scopes": ["drive.file"], "capability": "write"},
+      "sensitive_tools": ["write_drive_file", "share_drive_file"],
+      "body_keys": ["file_id", "file_name", "recipient"],
+      "decision_hint": "require_human"
+    },
+    "calendar.events": {
+      "provider": "google",
+      "risk": "medium",
+      "tool": "create_event",
+      "action": "create_event",
+      "summary": "An agent wants to create a calendar event.",
+      "scope": {"provider": "google", "scopes": ["calendar.events"], "capability": "write"},
+      "sensitive_tools": ["create_event", "delete_event"],
+      "body_keys": ["attendees", "title", "start", "end"],
+      "decision_hint": "require_human"
+    },
+    "stripe.charges": {
+      "provider": "stripe",
+      "risk": "high",
+      "tool": "create_charge",
+      "action": "create_charge",
+      "summary": "An agent wants to charge a customer through the connected Stripe account.",
+      "scope": {"provider": "stripe", "scopes": ["stripe.charges"], "capability": "charge", "cap": {"currency": "USD", "max_amount": 5000}},
+      "sensitive_tools": ["create_charge", "stripe.charges"],
+      "body_keys": ["amount", "currency", "customer"],
+      "decision_hint": "require_human"
+    },
+    "stripe.refunds": {
+      "provider": "stripe",
+      "risk": "high",
+      "tool": "refund_charge",
+      "action": "refund_charge",
+      "summary": "An agent wants to refund a charge through the connected Stripe account.",
+      "scope": {"provider": "stripe", "scopes": ["stripe.refunds"], "capability": "refund", "cap": {"currency": "USD", "max_amount": 5000}},
+      "sensitive_tools": ["refund_charge", "stripe.refunds"],
+      "body_keys": ["amount", "charge_id"],
+      "decision_hint": "require_human"
+    },
+    "slack.chat.write": {
+      "provider": "slack",
+      "risk": "medium",
+      "tool": "post_message",
+      "action": "post_message",
+      "summary": "An agent wants to post a message to a Slack channel.",
+      "scope": {"provider": "slack", "scopes": ["chat:write"], "capability": "write"},
+      "sensitive_tools": ["post_message", "chat.postMessage"],
+      "body_keys": ["channel", "text", "recipient"],
+      "decision_hint": "require_human"
+    },
+    "slack.files.write": {
+      "provider": "slack",
+      "risk": "high",
+      "tool": "upload_file",
+      "action": "upload_file",
+      "summary": "An agent wants to upload a file to Slack.",
+      "scope": {"provider": "slack", "scopes": ["files:write"], "capability": "write"},
+      "sensitive_tools": ["upload_file", "files.upload"],
+      "body_keys": ["channel", "filename", "content"],
+      "decision_hint": "require_human"
+    }
+  }
+}

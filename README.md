@@ -1,0 +1,270 @@
+# Grant
+
+**Consent infrastructure for AI agents.**
+
+When an agent acts on someone’s behalf — sends a message, refunds an order, writes a record, publishes content, spends budget — Grant appears with one quiet question:
+
+> Allow this, or not?
+
+The human gets one link. The agent gets a signed permission. Grant keeps the audit trail.
+
+This is a new product with its own brand, repository, database, and deployment. It is not a feature of AgentGrid or TraceLock.
+
+---
+
+## The idea
+
+People do not install HTTPS. They encounter it exactly when trust matters.
+
+Grant works the same way, but the primary integration is **invisible**:
+
+1. An MCP client or agent sends a tool call.
+2. Its URL points at Grant Gateway instead of the upstream tool server.
+3. Grant matches the call against policy and pauses it.
+4. The human gets one approval page: **Approve once**, **Always allow**, or **Reject**.
+5. Grant releases the original call and returns the normal upstream response.
+
+No agent code change is required for gateway users. The Python SDK exists for agents that want explicit control.
+
+Every approval link is an invitation to understand the product. No cold outreach required.
+
+The hosted service lives at **https://grant-approve.vercel.app**. The approval popup uses plain language ("Who's asking", "Expires — In 29m (9:21 AM international time)") and keeps account creation and sign-in inside the popup itself. Public pages are indexed through `public/robots.txt` and `public/sitemap.xml`; private approval, workspace, and ops paths are not.
+
+---
+
+## Quickstart
+
+```bash
+pip install grant-consent
+
+python -c "import grant; print(grant.__version__)"
+grantctl doctor --url https://grant-approve.vercel.app
+```
+
+```python
+from grant import Grant, GrantDenied
+
+grant = Grant("https://grant-approve.vercel.app", workspace="support")
+
+ask = grant.request(
+    agent="support-agent",
+    action="refund_order",
+    summary="Refund order ord_42 for $48.00",
+    scope={"order_id": "ord_42", "amount": 48},
+    ttl_minutes=30,
+)
+
+print(ask.message)  # put this where your agent normally talks to the human
+
+try:
+    permission = grant.wait(ask.id, timeout=300)
+    print(permission.policy, permission.signature)
+except GrantDenied:
+    print("The human said no. Do not run the action.")
+```
+
+The approval URL is a capability link. No account is required to approve.
+
+---
+
+## What ships in this repository
+
+| Path | What it is |
+| --- | --- |
+| `main.py` | FastAPI service: approval pages, gateway proxy, HTTP API, stats, health checks |
+| `grant/` | Python SDK with no third-party imports, plus local proxy daemon |
+| `grant/cli.py` | `grantctl` gateway, proxy, request, status, and verify commands |
+| `grant/db.py` | SQLite-first adapter; auto-applies Neon/Postgres schema when a DSN is set |
+| `grant/telemetry.py` | Privacy-preserving login/pop-up telemetry and live reach metrics |
+| `grant/login_library.py` | Read-only login/reach library: users, logins, pop-ups, computers, sanitized history |
+| `grant/assets/grant-inject.js` | Injectable browser interceptor for fetch/XHR and risky clicks |
+| `grant/policies/oauth_scopes.json` | Zero-custody OAuth scope → gateway rule templates |
+| `migrations/001_neon_schema.sql` | Exact durable Neon schema (prepared, not applied live) |
+| `tests/` | 84 passing tests covering consent, gateway, popup, magic receipt, A2A, browser inject, billing, telemetry, login library, and policy flows |
+| `docs/GATEWAY.md` | MCP gateway, local proxy, and OAuth policy templates |
+| `docs/` | Quickstart, framework examples, deployment, brand system |
+| `vercel.json` | Vercel function configuration |
+
+Grant covers four interception choke points: (1) the MCP/API tool gateway, (2) the outbound HTTP/local proxy with a 460×640 approval pop-up and validated `postMessage` handshake, (3) the injectable browser script that pauses `fetch`/XHR and risky DOM clicks, and (4) the agent-to-agent message bus gate. OAuth scope templates map provider scopes to per-action rules without token custody, and the approval card itself is the discovery surface: the persistent “● Protected by Grant · Zero-custody consent infrastructure” watermark sits on every card, and the post-approval Magic Receipt offers a passwordless dashboard link alongside the builder CTA.
+
+---
+
+## HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/requests` | Create an approval request |
+| `GET` | `/v1/requests/{id}` | Read status and signed permission |
+| `GET` | `/v1/permissions/{agent}` | List active permissions |
+| `POST` | `/v1/permissions/verify` | Verify a signed permission |
+| `POST` | `/v1/gateways` | Register a zero-code MCP/HTTP gateway |
+| `GET` | `/g/http/{token}/{path}` | Approval-gated HTTP reverse proxy |
+| `POST` | `/g/mcp/{token}` | Approval-gated MCP JSON-RPC proxy |
+| `GET` | `/stats` | Public, readable activity totals (cached 60 seconds) |
+| `GET` | `/stats.json` | Aggregate usage + live reach metrics only |
+| `GET` | `/login-history` | Token-gated login/pop-up history space |
+| `GET` | `/login-history.json` | Token-gated login/reach library report |
+| `POST` | `/v1/a2a/gate` | Hold an agent-to-agent handoff until a human signs it |
+| `GET` | `/v1/policies/oauth-scopes` | Zero-custody OAuth scope templates |
+| `GET` | `/grant-popup.js` | Single-source pop-up `postMessage` handshake |
+| `GET` | `/grant-inject.js` | Injectable browser interceptor (`fetch`, XHR, risky clicks) |
+| `GET` | `/health/live` | Process check |
+| `GET` | `/health/ready` | Database and signing check |
+
+Example request:
+
+```bash
+curl -X POST https://grant-approve.vercel.app/v1/requests \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent": "support-agent",
+    "action": "refund_order",
+    "summary": "Refund order ord_42 for $48.00",
+    "scope": {"order_id": "ord_42", "amount": 48},
+    "workspace": "support",
+    "ttl_minutes": 30
+  }'
+```
+
+The response includes `approval_url` and a ready-to-send `message`.
+
+---
+
+## CLI
+
+```bash
+grantctl request \
+  --agent support-agent \
+  --action refund_order \
+  --summary "Refund ord_42" \
+  --scope '{"order_id":"ord_42"}' \
+  --url https://grant-approve.vercel.app
+
+grantctl status req_abc123 --url https://grant-approve.vercel.app
+grantctl permissions support-agent --url https://grant-approve.vercel.app
+grantctl doctor --url https://grant-approve.vercel.app
+```
+
+---
+
+## Zero-code gateway
+
+```bash
+grantctl gateway \
+  --name "Payments API" \
+  --upstream https://api.example.com \
+  --workspace support \
+  --paths "/transfer,/payment,/refund" \
+  --body-keys "amount,recipient" \
+  --url https://grant-approve.vercel.app
+```
+
+Point the agent at the returned `http_url` or `mcp_url`. Sensitive calls pause for approval; routine calls pass through.
+
+For local or computer-use agents:
+
+```bash
+grantctl proxy \
+  --upstream https://api.example.com \
+  --port 8787 \
+  --open \
+  --url https://grant-approve.vercel.app
+```
+
+Then point the local agent at `http://127.0.0.1:8787/`.
+
+For browser/web agents, load the injectable script on the page the agent operates in:
+
+```html
+<script src="https://grant-approve.vercel.app/grant-inject.js"
+  data-grant-url="https://grant-approve.vercel.app"
+  data-agent="web-agent"
+  data-workspace="public"
+  data-sensitive-paths="stripe.com,googleapis.com"
+  data-risky-clicks="send,pay,delete,transfer,publish"></script>
+```
+
+It pauses matching `fetch`/XHR calls and high-risk clicks, opens the 460×640 hosted card, and resolves on a validated `postMessage` or a signed status poll. It never reads host-page credentials. For multi-agent systems, `grant.a2a_gate(sender=..., receiver=..., task=..., payload=...)` or `POST /v1/a2a/gate` holds the handoff until a human decides. The public request and A2A endpoints allow cross-origin calls with `Access-Control-Allow-Origin: *`; no credentials are accepted. See `docs/GATEWAY.md`.
+
+---
+
+## Magic Receipt
+
+Every approval card carries the persistent watermark `● Protected by Grant · Zero-custody consent infrastructure`. Once a human chooses Approve once, Always allow, or an auto-approve rule, the card becomes a receipt:
+
+- `Approved. Receipt req_... recorded.` — a signed receipt, never a blank close screen.
+- Path A: `Want to see every AI agent you've authorized—or revoke Always allow anytime?` → `Open Your Free Grant Dashboard →`.
+- Path B: `Building AI agents? Protect your own users' actions in 2 minutes.` → `Get Your Free API Key →` (currently starts at `/start?from=receipt`; Grant does not mint API keys).
+
+A signed, HttpOnly `grant_dashboard` cookie silently creates or reuses a workspace on approval, so the dashboard link is one click with no password form and no email capture. Billing email stays optional and is only used to match Cashfree payments. The receipt remains visible until the person chooses a path.
+
+---
+
+## Trust model
+
+- Scope values that look like keys, tokens, passwords, or email addresses are redacted before storage and display.
+- Permissions are HMAC-signed. A permission can be verified through `POST /v1/permissions/verify`.
+- Approval links are unguessable capability URLs. They are private pages and excluded from search indexing.
+- Public `/stats` and `/stats.json` are aggregate-only. They never return IDs, emails, scope values, or URLs; both public HTML pages (`/docs`, `/stats`) are cached for 60 seconds.
+- Private `/ops` shows aggregate user and live-reach counts behind a token; no IDs, emails, or raw stats are public.
+- Private `/login-history` is a dedicated token-gated space for login and pop-up history; `grant/login_library.py` is its read-only library (users, logins, pop-ups, computers). Both are excluded from search indexing.
+- Telemetry stores salted SHA-256 hashes and coarse device labels only — never raw IPs, device IDs, or approval tokens.
+- The Magic Receipt cookie (`grant_dashboard`) is an HttpOnly, SameSite=Lax signed workspace capability — no email, password, or OAuth token — and the signed receipt does not depend on it.
+- Gateway retries require a signed `X-Grant-Receipt` bound to the exact scope, workspace, gateway, and expiry.
+- Grant does not handle money, wallets, escrow, or in-app checkout. Payment links are hosted externally.
+- Workspaces are bookmarks. Optional renewal reminders are delivered only to the billing email saved for that workspace.
+
+---
+
+## Product-led growth loop
+
+- **Invite by action:** the approval link is delivered inside the agent’s normal flow.
+- **One-tap policy:** “Always allow” turns a single decision into a reusable permission.
+- **Workspace bookmark:** the decision page leads to a quiet workspace with the install snippet.
+- **Embeddable message:** `ask.message` is designed to be pasted into agent output, Slack, or a tool result.
+- **Popup triggers:** OAuth-style window with `postMessage` auto-close, Shadow-DOM widget, injectable browser script, and mobile deep-link card.
+- **Magic Receipt:** the approval card is the landing page; the watermark builds builder trust, and the signed receipt turns a one-time approver into a passwordless workspace owner in one click.
+- **Contextual guardrails:** conditional auto-approve rules, Slack/webhook delivery, team routing, SMS/WhatsApp, and audit retention are offered at the moment of risk.
+- **Public proof:** aggregate stats show adoption without exposing private data.
+
+No fake engagement, voting, mass outreach, or purchased traffic is part of this system.
+
+---
+
+## Brand
+
+Beige paper, burgundy ink, translucent glass surfaces, serif headlines, and faint circuit traces inspired by transparent hardware design. No neon, no cyberpunk glow, no “AI purple”.
+
+See `docs/BRAND.md` for the exact palette and motion rules.
+
+---
+
+## Pricing
+
+Four tiers at `/pricing`, with a monthly/annual toggle (20% off annual). Annual prices are display-only; hosted checkout is monthly-only.
+
+- **Free** ($0) — Basic Approve once / Always allow pop-up, Email & Web links (1,000/mo), 7-day audit trail. Includes a 14-day Pro Guardrails reverse trial.
+- **Plus** ($20/mo or ₹2,400/mo) — For solo builders putting an agent into production with real users or money. Locks: auto-approve rules (spend/scope caps), Slack & Webhook instant approvals (15,000/mo), 30-day audit log retention.
+- **Pro** ($150/mo or ₹12,600/mo) — For teams running agents across departments with compliance needs. Locks: multi-approver routing & role rules, SMS / WhatsApp approval alerts (100,000/mo), 1-year audit trail + CSV/JSON exports.
+- **Enterprise** ($4,000/mo or ₹340,000/mo) — For large organizations and platforms embedding Grant at scale under strict security and legal procurement. Contact CTA with custom terms. Locks: white-label domain & custom branding, SSO / SAML & org directory sync, 99.99% SLA + real-time SIEM log streaming (with custom retention of 7+ years).
+
+Plan positioning, feature bullets, and lock flags live in `grant/plans.py`; `/pricing` renders those exact bullets, and approval drawers surface the relevant Plus/Pro lock at the moment of risk. Live agents still run on soft limits — feature locks are commercial/UI gates, not hard request blockers.
+
+Cashfree-hosted monthly forms only. One signed webhook resolves the tier by permanent form/link ID or paid amount, matches the normalized billing email, sets a 32-day expiry, and resets the monthly quota. A different checkout email is stored as a verified unclaimed receipt and can be claimed from the workspace Billing section. Day-27 renewal reminders point back to the same static form and are sent only through an explicitly configured email webhook. Grant itself never takes payment or handles cards. Soft limits never stop a live agent.
+
+---
+
+## Local development
+
+```bash
+python -m venv .venv
+. .venv/Scripts/activate      # Windows
+pip install -r requirements.txt
+pip install -e .
+uvicorn main:app --reload
+python -m pytest tests -q
+```
+
+Current status: **84 passed**.
+
+Before public launch, set `GRANT_PUBLIC_BASE_URL` and `GRANT_SIGNING_SECRET`, and provision a Neon DSN (`DATABASE_URL` / `NEON_DATABASE_URL` / `GRANT_NEON_DATABASE_URL`) for durable storage — the schema in `migrations/001_neon_schema.sql` then applies automatically on boot. None of these deployments or schema applications happen without explicit authorization. See `docs/DEPLOYMENT.md`.

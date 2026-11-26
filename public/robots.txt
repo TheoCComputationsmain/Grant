@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+Disallow: /a/
+Disallow: /r/
+Disallow: /v1/
+Disallow: /w/
+Disallow: /console
+Disallow: /ops
+Disallow: /login-history
+Disallow: /protected/
+
+Sitemap: https://grant-approve.vercel.app/sitemap.xml

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+.vercel/
+.publish_assets/
+.env*
+!.env.example

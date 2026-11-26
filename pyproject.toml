@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grant-consent"
+version = "0.1.0"
+description = "Consent infrastructure for AI agents. One link. One decision. Full audit."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Grant" }]
+keywords = ["ai", "agents", "consent", "authorization", "mcp", "langgraph", "crewai"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2,<3",
+  "python-multipart>=0.0.9,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "vercel-blob>=0.5,<1",
+  "psycopg[binary]>=3.1,<4",
+]
+
+[project.urls]
+Homepage = "https://grant-approve.vercel.app"
+Documentation = "https://grant-approve.vercel.app/docs"
+Source = "https://vercel.com/theoccomputationsmain/grant-consent"
+
+[project.scripts]
+grantctl = "grant.cli:main"
+
+[tool.setuptools]
+packages = ["grant", "grant.assets", "grant.policies"]
+
+[tool.setuptools.package-data]
+grant = ["assets/*.js", "policies/*.json"]
