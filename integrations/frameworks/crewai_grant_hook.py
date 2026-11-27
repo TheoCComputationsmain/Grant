@@ -31,7 +31,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-DEFAULT_GRANT_BASE_URL = "https://grant-consent.vercel.app"
+DEFAULT_GRANT_BASE_URL = "https://grant-approve.vercel.app"
 ALLOWING_DECISIONS = {"approve", "always", "auto_rule", "approved"}
 
 
@@ -65,7 +65,9 @@ def resolve_grant_base_url(explicit: str | None = None) -> str:
             except (OSError, ValueError):
                 name = ""
             if name:
-                return f"https://{name}.vercel.app"
+                # `grant-consent` is the Vercel project name; the verified
+                # production alias is `grant-approve.vercel.app`.
+                return DEFAULT_GRANT_BASE_URL if name == "grant-consent" else f"https://{name}.vercel.app"
     return DEFAULT_GRANT_BASE_URL
 
 

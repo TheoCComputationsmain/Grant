@@ -15,7 +15,7 @@ import type {
   PluginParameters,
 } from '../types';
 
-const DEFAULT_GRANT_BASE_URL = 'https://grant-consent.vercel.app';
+const DEFAULT_GRANT_BASE_URL = 'https://grant-approve.vercel.app';
 const DEFAULT_PROTECTED_TOOLS: string[] = [
   'send_email',
   'send_message',

@@ -7,7 +7,7 @@
 ## What it does
 
 1. Parses an OpenAI-style tool call (`tool_calls`, `tools`, `tool`, or `tool_name`).
-2. For protected tools, calls `POST https://grant-consent.vercel.app/v1/approvals` with only the tool name, call id, argument key names, and a correlation hash.
+2. For protected tools, calls `POST https://grant-approve.vercel.app/v1/approvals` with only the tool name, call id, argument key names, and a correlation hash.
 3. If approved, verifies the signed receipt with `POST /v1/receipts/verify` and forwards the request to `UPSTREAM_URL` with `X-Grant-Receipt` and `X-Grant-Request-Id`.
 4. If pending, returns `202` with `approval_url` and `request_id` (checkpoint mode). `GRANT_MODE=blocking` polls `GET /v1/approvals/{request_id}` instead.
 5. If a caller supplies `X-Grant-Receipt`, the Worker verifies it first and rejects invalid receipts with `403` before any upstream call.
@@ -24,7 +24,7 @@ npx wrangler secret put GRANT_API_KEY
 npx wrangler deploy
 ```
 
-Derived base URL: `https://grant-consent.vercel.app` from `.vercel/project.json` → `projectName`. Override with `GRANT_BASE_URL` in `wrangler.toml` or a secret.
+Base URL: `https://grant-approve.vercel.app`, the verified production alias of the `grant-consent` Vercel project. Override with `GRANT_BASE_URL` in `wrangler.toml` or a secret.
 
 Test the gate:
 
@@ -37,7 +37,7 @@ curl -X POST https://GRANT-AI-GATEWAY.WORKERS.dev \
 Expected while pending:
 
 ```json
-{"status":"approval_required","request_id":"req_...","approval_url":"https://grant-consent.vercel.app/a/req_...","message":"Open the Grant pop-up, approve, then retry with X-Grant-Receipt."}
+{"status":"approval_required","request_id":"req_...","approval_url":"https://grant-approve.vercel.app/a/req_...","message":"Open the Grant pop-up, approve, then retry with X-Grant-Receipt."}
 ```
 
 After approval, retry with the returned header:

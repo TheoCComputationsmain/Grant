@@ -11,7 +11,7 @@
         "description": [
           {
             "type": "subHeading",
-            "text": "Paste a gr_live_ key from https://grant-consent.vercel.app/start. Leave empty for the 20 calls/hour demo tier."
+            "text": "Paste a gr_live_ key from https://grant-approve.vercel.app/start. Leave empty for the 20 calls/hour demo tier."
           }
         ],
         "encrypted": true
@@ -41,7 +41,7 @@
           "grantBaseUrl": {
             "type": "string",
             "label": "Grant base URL",
-            "default": "https://grant-consent.vercel.app",
+            "default": "https://grant-approve.vercel.app",
             "description": [
               {
                 "type": "text",

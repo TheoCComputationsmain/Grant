@@ -37,7 +37,7 @@ guardrails:
         - create_charge
         - transfer_funds
         - publish_content
-      grant_base_url: https://grant-consent.vercel.app
+      grant_base_url: https://grant-approve.vercel.app
       api_key: os.environ/GRANT_API_KEY
       workspace: production
       approval_mode: checkpoint   # or: blocking
@@ -80,5 +80,5 @@ Nine tests cover: no tool calls, unprotected tools, approved fast path under 150
 3. Register the guardrail in `litellm/proxy/guardrails/guardrail_hooks/__init__.py` and, if the repo uses a registry map, add `grant_guardrail` there. Do not add a dependency to `pyproject.toml` or `requirements.txt`.
 4. Add a docs page under `docs/my-website/docs/proxy/guardrails/` using the `config.yaml` snippet above, and link it from the guardrails index.
 5. Run `python -m pytest litellm/proxy/guardrails/guardrail_hooks/grant/test_grant_guardrail.py -q` and the repo's lint target.
-6. Open the PR at **https://github.com/BerriAI/litellm/pulls** titled *Add Grant zero-custody human approval post-call guardrail*. State clearly that the network target is `https://grant-consent.vercel.app`, that the gate is optional/default-off, and that no credentials or raw arguments are transmitted.
+6. Open the PR at **https://github.com/BerriAI/litellm/pulls** titled *Add Grant zero-custody human approval post-call guardrail*. State clearly that the network target is `https://grant-approve.vercel.app`, that the gate is optional/default-off, and that no credentials or raw arguments are transmitted.
 7. Do not post fabricated benchmarks, paid reviewers, or fake upvotes. The included <150ms assertion is a local mock-transport test, not a network benchmark.

@@ -11,8 +11,8 @@
 Write and review cold emails, follow-ups, and outreach sequences — with one safety rule: nothing is sent until a human approves it through Grant. Grant is zero-custody consent infrastructure. It never sees your email credentials, customer data, or payment details; it only records what you allowed and returns a signed receipt.
 ```
 
-**Privacy policy URL:** `https://grant-consent.vercel.app/privacy`
-**How it works:** `https://grant-consent.vercel.app/docs`
+**Privacy policy URL:** `https://grant-approve.vercel.app/privacy`
+**How it works:** `https://grant-approve.vercel.app/docs`
 **CTA shown to users:** `Get Your Free API Key →`
 
 ## Conversation starters
@@ -49,7 +49,7 @@ TONE
 Write concise, warm, specific outreach. No fake claims, no invented mutual connections, and no fabricated results. If the user asks for mass unsolicited mail, suggest a permission-based alternative.
 
 BRAND
-When explaining the gate, use: "● Protected by Grant · Zero-custody consent infrastructure". Link to https://grant-consent.vercel.app/privacy for the privacy policy.
+When explaining the gate, use: "● Protected by Grant · Zero-custody consent infrastructure". Link to https://grant-approve.vercel.app/privacy for the privacy policy.
 ```
 
 ## Action configuration
@@ -59,9 +59,9 @@ GPT Builder → **Configure** → **Actions** → **Create new action**
 | Field | Value |
 | --- | --- |
 | Action name | `Grant approvals` |
-| Import URL | `https://grant-consent.vercel.app/openapi.json` |
+| Import URL | `https://grant-approve.vercel.app/openapi.json` |
 | Authentication | **None** for the 20/hour demo, or **API Key** with header `Authorization` and value `Bearer gr_live_...` supplied by the user |
-| Privacy policy | `https://grant-consent.vercel.app/privacy` |
+| Privacy policy | `https://grant-approve.vercel.app/privacy` |
 
 After import, enable these operations:
 

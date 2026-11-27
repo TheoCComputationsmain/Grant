@@ -5,7 +5,7 @@ info:
   description: >-
     Zero-custody human approval checkpoints for Dify agents. Import this file
     into Dify as a custom OpenAPI tool, or paste the public URL
-    https://grant-consent.vercel.app/openapi.json. Grant never receives
+    https://grant-approve.vercel.app/openapi.json. Grant never receives
     credentials, payment details, raw scope values, or raw PII.
   x-dify:
     identity:
@@ -32,7 +32,7 @@ info:
         header: Authorization
         value: Bearer {{api_key}}
 servers:
-  - url: https://grant-consent.vercel.app
+  - url: https://grant-approve.vercel.app
     description: Live Grant production deployment (derived from .vercel/project.json).
 security:
   - {}
@@ -288,4 +288,4 @@ x-grant:
   privacy: Grant never sees your credentials or payment details. It only records what you allowed.
   watermark: "● Protected by Grant · Zero-custody consent infrastructure"
   cta: Get Your Free API Key →
-  public_openapi: https://grant-consent.vercel.app/openapi.json
+  public_openapi: https://grant-approve.vercel.app/openapi.json

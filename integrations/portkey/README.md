@@ -18,7 +18,7 @@
         {
           "id": "grant.index",
           "parameters": {
-            "grantBaseUrl": "https://grant-consent.vercel.app",
+            "grantBaseUrl": "https://grant-approve.vercel.app",
             "protectedTools": ["*"],
             "agentName": "portkey-gateway",
             "workspace": "production",
@@ -65,7 +65,7 @@ npx vitest run plugins/grant
 3. Register `grant` in `conf.json` → `plugins_enabled` so `plugins/build.ts` generates the `grant.index` import. Do not add an npm dependency.
 4. Add a short section to `plugins/README.md` listing the new plugin and the config snippet above.
 5. Run `npm run build-plugins && npm run test:plugins`; include the output in the PR description.
-6. Open **https://github.com/Portkey-AI/gateway/pulls** with title *Add Grant zero-custody human approval guardrail plugin*. State that the endpoint is `https://grant-consent.vercel.app/v1/approvals`, that the gate is opt-in via `guardrails`, and that verdict semantics are unchanged.
+6. Open **https://github.com/Portkey-AI/gateway/pulls** with title *Add Grant zero-custody human approval guardrail plugin*. State that the endpoint is `https://grant-approve.vercel.app/v1/approvals`, that the gate is opt-in via `guardrails`, and that verdict semantics are unchanged.
 7. Include a note that pending approvals do not execute the protected tool and that signed receipts are verified by Grant's `/v1/receipts/verify` endpoint downstream.
 
 No fabricated test results, paid reviewers, or fake traffic.

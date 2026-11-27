@@ -7,19 +7,18 @@ Zero-dependency, zero-custody adapters that point at Grant's live hosted HTTP su
 Every manifest, template, and plugin in this directory uses:
 
 ```
-https://grant-consent.vercel.app
+https://grant-approve.vercel.app
 ```
 
-That default is derived from `.vercel/project.json` → `projectName: "grant-consent"`. Live aliases also resolve to the same deployment:
+This is the verified production alias of the `grant-consent` Vercel project (`.vercel/project.json` → `projectName: "grant-consent"`). The alias is pinned so every adapter resolves to the live domain instead of the project's default `*.vercel.app` URL:
 
-- `https://grant-consent.vercel.app`
-- `https://grant-pied.vercel.app`
-- `https://grant-approve.vercel.app`
+- `https://grant-approve.vercel.app` — **canonical; the only domain used by every file in this directory**
+- `https://grant-pied.vercel.app` — secondary alias, not used in manifests
 
-To re-derive from a checkout:
+To re-derive from a checkout (auto-detect the project, pin the verified alias):
 
 ```bash
-python -c "import json,pathlib; p=json.loads(pathlib.Path('.vercel/project.json').read_text()); print('https://' + p['projectName'] + '.vercel.app')"
+python -c "import json,pathlib; p=json.loads(pathlib.Path('.vercel/project.json').read_text()); print('https://grant-approve.vercel.app' if p['projectName'] == 'grant-consent' else 'https://' + p['projectName'] + '.vercel.app')"
 ```
 
 Optional override in adapters: `GRANT_BASE_URL` (or `GRANT_PUBLIC_BASE_URL` on the service).

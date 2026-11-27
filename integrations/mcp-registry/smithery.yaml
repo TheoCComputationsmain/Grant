@@ -1,6 +1,6 @@
 # Grant · Smithery URL-publishing metadata
 # This is zero-install metadata. Smithery's URL flow scans the live Streamable
-# HTTP endpoint at https://grant-consent.vercel.app/api/mcp; there is no
+# HTTP endpoint at https://grant-approve.vercel.app/api/mcp; there is no
 # Dockerfile, no local command, and no npm/pip install step.
 name: "@grant/consent"
 display_name: "Grant · Human-in-the-loop approvals"
@@ -9,21 +9,21 @@ description: >-
   Consent infrastructure for AI agents. Grant pauses a proposed tool call,
   sends one private approval link to a human, and returns a signed receipt.
   Grant never sees credentials, payment details, raw scope values, or raw PII.
-homepage: "https://grant-consent.vercel.app"
-docs: "https://grant-consent.vercel.app/docs"
-privacy_policy: "https://grant-consent.vercel.app/privacy"
-openapi: "https://grant-consent.vercel.app/openapi.json"
+homepage: "https://grant-approve.vercel.app"
+docs: "https://grant-approve.vercel.app/docs"
+privacy_policy: "https://grant-approve.vercel.app/privacy"
+openapi: "https://grant-approve.vercel.app/openapi.json"
 
 remote:
   transport: "streamable-http"
-  url: "https://grant-consent.vercel.app/api/mcp"
+  url: "https://grant-approve.vercel.app/api/mcp"
   protocol_version: "2025-06-18"
   methods:
     - initialize
     - notifications/initialized
     - tools/list
     - tools/call
-  setup_page: "https://grant-consent.vercel.app/api/mcp"
+  setup_page: "https://grant-approve.vercel.app/api/mcp"
 
 installation:
   required: false
@@ -101,7 +101,7 @@ tools:
     example_output:
       request_id: "req_8Kx2mQ1pL"
       status: "pending"
-      approval_url: "https://grant-consent.vercel.app/a/req_8Kx2mQ1pL"
+      approval_url: "https://grant-approve.vercel.app/a/req_8Kx2mQ1pL"
       receipt_url: "/receipt/req_8Kx2mQ1pL"
       expires_at: "2026-11-27T10:21:00Z"
       scope_hash: "9f2c..."

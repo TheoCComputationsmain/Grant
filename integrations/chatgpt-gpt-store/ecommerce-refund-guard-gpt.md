@@ -11,8 +11,8 @@
 Use AI to triage refunds, disputes, and charge adjustments without letting the agent act alone. Before any refund, charge, or payout is issued, the GPT opens a Grant checkpoint with one private approval link. Grant is zero-custody: it never sees Stripe keys, card numbers, or customer PII. It records only the decision and returns a signed receipt.
 ```
 
-**Privacy policy URL:** `https://grant-consent.vercel.app/privacy`
-**How it works:** `https://grant-consent.vercel.app/docs`
+**Privacy policy URL:** `https://grant-approve.vercel.app/privacy`
+**How it works:** `https://grant-approve.vercel.app/docs`
 **CTA shown to users:** `Get Your Free API Key →`
 
 ## Conversation starters
@@ -49,7 +49,7 @@ JUDGMENT
 Flag duplicate refunds, mismatched amounts, and requests outside the store's stated policy. Ask for clarification instead of guessing. Never fabricate an order, payment, or receipt.
 
 BRAND
-When explaining the gate, use: "● Protected by Grant · Zero-custody consent infrastructure". Link to https://grant-consent.vercel.app/privacy for the privacy policy.
+When explaining the gate, use: "● Protected by Grant · Zero-custody consent infrastructure". Link to https://grant-approve.vercel.app/privacy for the privacy policy.
 ```
 
 ## Action configuration
@@ -59,9 +59,9 @@ GPT Builder → **Configure** → **Actions** → **Create new action**
 | Field | Value |
 | --- | --- |
 | Action name | `Grant approvals` |
-| Import URL | `https://grant-consent.vercel.app/openapi.json` |
+| Import URL | `https://grant-approve.vercel.app/openapi.json` |
 | Authentication | **None** for the 20/hour demo, or **API Key** with header `Authorization` and value `Bearer gr_live_...` supplied by the user |
-| Privacy policy | `https://grant-consent.vercel.app/privacy` |
+| Privacy policy | `https://grant-approve.vercel.app/privacy` |
 
 Enable these imported operations:
 

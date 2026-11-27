@@ -18,7 +18,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://grant-consent.vercel.app/v1/approvals",
+        "url": "https://grant-approve.vercel.app/v1/approvals",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -79,7 +79,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://grant-consent.vercel.app/v1/receipts/verify",
+        "url": "https://grant-approve.vercel.app/v1/receipts/verify",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

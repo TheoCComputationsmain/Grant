@@ -2,12 +2,12 @@
 
 Drop-in gate for any tool router that can call an HTTPS endpoint before executing a tool. It uses the same zero-wrapper surfaces as every other Grant integration.
 
-**Grant base URL:** `https://grant-consent.vercel.app` (derived from `.vercel/project.json` → `projectName: grant-consent`; override with `GRANT_BASE_URL`)
+**Grant base URL:** `https://grant-approve.vercel.app` (verified production alias of the `grant-consent` Vercel project; override with `GRANT_BASE_URL`)
 **Checkpoint:** `POST /v1/approvals` (alias: `POST /v1/gate/webhook`)
 **Poll:** `GET /v1/approvals/{request_id}`
 **Verify:** `POST /v1/receipts/verify`
 **MCP tools:** `request_human_approval`, `check_approval_status` via `POST /api/mcp`
-**Privacy:** `https://grant-consent.vercel.app/privacy`
+**Privacy:** `https://grant-approve.vercel.app/privacy`
 **Watermark:** `● Protected by Grant · Zero-custody consent infrastructure`
 
 ## Zero-custody contract
@@ -17,7 +17,7 @@ Send only `agent_name`, `tool_name`, a short `summary`, and redacted `scope` met
 ## 1. Create the checkpoint
 
 ```bash
-curl -X POST https://grant-consent.vercel.app/v1/approvals \
+curl -X POST https://grant-approve.vercel.app/v1/approvals \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer gr_live_...' \
   -d '{
@@ -36,14 +36,14 @@ Response:
   "id": "req_8Kx2mQ1pL",
   "request_id": "req_8Kx2mQ1pL",
   "status": "pending",
-  "approval_url": "https://grant-consent.vercel.app/a/req_8Kx2mQ1pL",
+  "approval_url": "https://grant-approve.vercel.app/a/req_8Kx2mQ1pL",
   "receipt_url": "/receipt/req_8Kx2mQ1pL",
   "signed_receipt": "",
   "expires_at": "2026-11-27T10:21:00Z"
 }
 ```
 
-Omit `Authorization` for the 20 calls/hour demo tier. Create keys at `https://grant-consent.vercel.app/start` (`Get Your Free API Key →`).
+Omit `Authorization` for the 20 calls/hour demo tier. Create keys at `https://grant-approve.vercel.app/start` (`Get Your Free API Key →`).
 
 ## 2. Handle the decision
 
@@ -54,7 +54,7 @@ Omit `Authorization` for the 20 calls/hour demo tier. Create keys at `https://gr
 Poll example:
 
 ```bash
-curl https://grant-consent.vercel.app/v1/approvals/req_8Kx2mQ1pL
+curl https://grant-approve.vercel.app/v1/approvals/req_8Kx2mQ1pL
 ```
 
 The response includes `status`, `decision`, `decision_type`, `signed_receipt`, `receipt_verified`, and `receipt_url`.
@@ -62,7 +62,7 @@ The response includes `status`, `decision`, `decision_type`, `signed_receipt`, `
 ## 3. Verify the receipt, then execute
 
 ```bash
-curl -X POST https://grant-consent.vercel.app/v1/receipts/verify \
+curl -X POST https://grant-approve.vercel.app/v1/receipts/verify \
   -H 'Content-Type: application/json' \
   -d '{"signed_receipt": "<signed_receipt>", "request_id": "req_8Kx2mQ1pL"}'
 ```
@@ -74,7 +74,7 @@ Proceed only when `valid` is `true` (and `request_id_matches` is `true` when sup
 ```js
 export default async function grantGate({ steps }) {
   const event = steps.trigger.event.body;
-  const base = process.env.GRANT_BASE_URL || 'https://grant-consent.vercel.app';
+  const base = process.env.GRANT_BASE_URL || 'https://grant-approve.vercel.app';
 
   const checkpoint = await fetch(`${base}/v1/approvals`, {
     method: 'POST',
@@ -127,7 +127,7 @@ Configure the router to skip the downstream step when `execute` is `false`, and 
 Copy `cline_mcp_config.json` into the client's MCP configuration (Cline: MCP Settings → Remote Servers; Cursor: `.cursor/mcp.json`; Windsurf: `~/.codeium/windsurf/mcp_config.json`). It points at:
 
 ```
-https://grant-consent.vercel.app/api/mcp
+https://grant-approve.vercel.app/api/mcp
 ```
 
 Demo mode works with an empty `headers` object. For production, add a key:
@@ -136,11 +136,11 @@ Demo mode works with an empty `headers` object. For production, add a key:
 "headers": { "Authorization": "Bearer gr_live_..." }
 ```
 
-Available tools: `request_human_approval` and `check_approval_status` (aliases: `grant.request_approval`, `grant.get_request`). Public contract: `https://grant-consent.vercel.app/openapi.json`.
+Available tools: `request_human_approval` and `check_approval_status` (aliases: `grant.request_approval`, `grant.get_request`). Public contract: `https://grant-approve.vercel.app/openapi.json`.
 
 ## Rollout checklist
 
 1. Keep the gate enabled for mutating tools only (`send_*`, `refund_*`, `charge_*`, `publish_*`, `write_*`, `delete_*`).
 2. Confirm no router log records raw arguments or Grant receipt values.
 3. Confirm every downstream action checks `valid: true` before execution.
-4. Point users to `https://grant-consent.vercel.app/privacy` in the router's tool description.
+4. Point users to `https://grant-approve.vercel.app/privacy` in the router's tool description.

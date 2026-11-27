@@ -6,7 +6,7 @@
  * and a correlation hash. Never argument values, credentials, or payment data.
  */
 
-const DEFAULT_GRANT_BASE_URL = 'https://grant-consent.vercel.app';
+const DEFAULT_GRANT_BASE_URL = 'https://grant-approve.vercel.app';
 const DEFAULT_PROTECTED_TOOLS = [
   'send_email',
   'send_message',

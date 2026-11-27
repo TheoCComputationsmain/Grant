@@ -2,11 +2,11 @@
 
 Both listings point at the same hosted Streamable HTTP MCP endpoint. No installation step, no Dockerfile, and no local process.
 
-**Remote MCP URL:** `https://grant-consent.vercel.app/api/mcp`
-**Public contract:** `https://grant-consent.vercel.app/openapi.json`
-**Privacy policy:** `https://grant-consent.vercel.app/privacy`
+**Remote MCP URL:** `https://grant-approve.vercel.app/api/mcp`
+**Public contract:** `https://grant-approve.vercel.app/openapi.json`
+**Privacy policy:** `https://grant-approve.vercel.app/privacy`
 
-If the project name in `.vercel/project.json` changes, replace `grant-consent` with the new name in `smithery.yaml`, `glama.json`, and this guide.
+The canonical domain is the verified production alias of the `grant-consent` Vercel project. If the live alias changes, update `https://grant-approve.vercel.app` in `smithery.yaml`, `glama.json`, and this guide.
 
 ## Shared copy (paste exactly)
 
@@ -29,7 +29,7 @@ Grant is consent infrastructure for AI agents. When an assistant is about to sen
 
 Grant is zero-custody: it never receives credentials, payment details, raw scope values, or raw PII. It stores a one-way hash of redacted scope metadata and a minimal signed receipt containing the request ID, decision, agent, tool name, and timestamp.
 
-This is a hosted Remote MCP server over Streamable HTTP. There is nothing to install and no local runtime: point your MCP client at https://grant-consent.vercel.app/api/mcp and call request_human_approval or check_approval_status. A free demo tier allows 20 calls per hour without a key; add a gr_live_ Bearer key for production.
+This is a hosted Remote MCP server over Streamable HTTP. There is nothing to install and no local runtime: point your MCP client at https://grant-approve.vercel.app/api/mcp and call request_human_approval or check_approval_status. A free demo tier allows 20 calls per hour without a key; add a gr_live_ Bearer key for production.
 ```
 
 **Tags**
@@ -53,18 +53,18 @@ Legacy aliases `grant.request_approval` and `grant.get_request` are also availab
 2. Choose **URL** publishing and paste:
 
    ```
-   https://grant-consent.vercel.app/api/mcp
+   https://grant-approve.vercel.app/api/mcp
    ```
 
 3. Fill the listing fields from the shared copy above. Use namespace `@grant` and server name `consent`, giving the qualified name `@grant/consent`.
 4. Leave configuration fields empty (the endpoint accepts an optional `Authorization: Bearer gr_live_...` header and works without one in demo mode).
 5. Attach `smithery.yaml` in the repository as the submission record and confirm the scanner sees both tools; the live server advertises them at `tools/list`.
-6. Publish, then verify the server page links to `https://grant-consent.vercel.app/docs` and `https://grant-consent.vercel.app/privacy`.
+6. Publish, then verify the server page links to `https://grant-approve.vercel.app/docs` and `https://grant-approve.vercel.app/privacy`.
 
 CLI equivalent (after `npm i -g @smithery/cli` and `smithery login`):
 
 ```bash
-smithery mcp publish "grant-consent.vercel.app/api/mcp" -n @grant/consent
+smithery mcp publish "https://grant-approve.vercel.app/api/mcp" -n @grant/consent
 ```
 
 ## Glama.ai
@@ -73,13 +73,13 @@ smithery mcp publish "grant-consent.vercel.app/api/mcp" -n @grant/consent
 2. Server URL:
 
    ```
-   https://grant-consent.vercel.app/api/mcp
+   https://grant-approve.vercel.app/api/mcp
    ```
 
 3. Repository URL:
 
    ```
-   https://github.com/theoccomputations/Grant
+   https://github.com/TheoCComputationsmain/Grant
    ```
 
 4. Paste the shared title, tagline, description, and tags. Set maintainer to the GitHub username in `glama.json` (`theoccomputations`); change both if the listing is claimed from a different account.

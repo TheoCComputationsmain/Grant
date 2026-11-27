@@ -1,6 +1,6 @@
 # Grant workflow templates · n8n + Dify
 
-Both templates call the live Grant deployment at `https://grant-consent.vercel.app`. Nothing to install locally, no credentials in the files, and no raw scope values in Grant requests.
+Both templates call the live Grant deployment at `https://grant-approve.vercel.app`. Nothing to install locally, no credentials in the files, and no raw scope values in Grant requests.
 
 ## n8n · 3-step import
 
@@ -22,7 +22,7 @@ Community gallery submission: attach the JSON to a post in the n8n community wor
 
 ## Dify · 3-step import
 
-1. In Dify, open **Tools → Create Tool → Import from OpenAPI** and upload `dify-grant-tool.yaml`. Alternatively paste `https://grant-consent.vercel.app/openapi.json` as the import URL.
+1. In Dify, open **Tools → Create Tool → Import from OpenAPI** and upload `dify-grant-tool.yaml`. Alternatively paste `https://grant-approve.vercel.app/openapi.json` as the import URL.
 2. In the tool's credential form, leave the API key blank for demo mode or paste a `gr_live_...` key (Dify sends `Authorization: Bearer <key>`). Confirm three tools appear: `createApproval`, `getApproval`, `verifyReceipt`.
 3. Add the tools to an agent with this instruction: *Before any sending, refund, charge, publish, or spend tool, call `createApproval`. If status is pending, show the approval_url and stop. On approval, call `verifyReceipt` and only then run the protected tool.*
 
@@ -32,4 +32,4 @@ Publisher metadata (inside the YAML under `info.x-dify`): provider `grant_consen
 
 - Grant receives only `agent_name`, `tool_name`, a short summary, and redacted scope keys. Never put tokens, card numbers, emails, or raw payloads in `scope`.
 - Signed receipts contain no scope values. Always verify with `POST /v1/receipts/verify` before executing the protected action.
-- Public endpoints accept 20 calls/hour without a key. Production users should add `Get Your Free API Key →` from `https://grant-consent.vercel.app/start`.
+- Public endpoints accept 20 calls/hour without a key. Production users should add `Get Your Free API Key →` from `https://grant-approve.vercel.app/start`.

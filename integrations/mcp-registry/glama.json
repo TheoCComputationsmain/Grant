@@ -10,11 +10,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/theoccomputations/Grant"
+    "url": "https://github.com/TheoCComputationsmain/Grant"
   },
-  "homepage": "https://grant-consent.vercel.app",
-  "documentation": "https://grant-consent.vercel.app/docs",
-  "privacyPolicy": "https://grant-consent.vercel.app/privacy",
+  "homepage": "https://grant-approve.vercel.app",
+  "documentation": "https://grant-approve.vercel.app/docs",
+  "privacyPolicy": "https://grant-approve.vercel.app/privacy",
   "tags": [
     "security",
     "human-in-the-loop",
@@ -26,7 +26,7 @@
   "remotes": [
     {
       "transport": "streamable-http",
-      "url": "https://grant-consent.vercel.app/api/mcp",
+      "url": "https://grant-approve.vercel.app/api/mcp",
       "protocolVersion": "2025-06-18",
       "authentication": "optional Bearer gr_live_... key; 20 calls/hour in demo mode"
     }

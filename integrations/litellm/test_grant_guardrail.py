@@ -36,7 +36,7 @@ PENDING = {
     "id": "req_pending1",
     "request_id": "req_pending1",
     "status": "pending",
-    "approval_url": "https://grant-consent.vercel.app/a/req_pending1",
+    "approval_url": "https://grant-approve.vercel.app/a/req_pending1",
     "receipt_url": "/receipt/req_pending1",
     "expires_at": "2026-11-27T10:21:00Z",
 }
@@ -68,7 +68,10 @@ def _client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-def test_default_base_url_is_live_production():
+def test_default_base_url_is_live_production(monkeypatch):
+    # The app test suite sets GRANT_PUBLIC_BASE_URL=https://grant.test globally.
+    monkeypatch.delenv("GRANT_BASE_URL", raising=False)
+    monkeypatch.delenv("GRANT_PUBLIC_BASE_URL", raising=False)
     assert resolve_grant_base_url() == DEFAULT_GRANT_BASE_URL
     assert resolve_grant_base_url("https://custom.example/") == "https://custom.example"
 
