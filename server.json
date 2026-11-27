@@ -3,6 +3,14 @@
   "name": "io.github.TheoCComputationsmain/grant-consent",
   "title": "Grant · Human-in-the-loop approvals",
   "description": "Zero-custody human approval checkpoints for AI agents.",
+  "websiteUrl": "https://grant-approve.vercel.app",
+  "icons": [
+    {
+      "src": "https://grant-approve.vercel.app/icons/icon-512.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": ["512x512"]
+    }
+  ],
   "repository": {
     "url": "https://github.com/TheoCComputationsmain/Grant",
     "source": "github"

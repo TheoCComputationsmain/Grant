@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stripe & E-Commerce Refund Guard</title>
+  <meta name="description" content="Every customer refund and charge gets one human yes before it happens." />
+  <style>
+    :root {
+      --paper: #FAF8F5;
+      --sand: #E6E1D6;
+      --ink: #1c1a17;
+      --burgundy: #7b2338;
+      --muted: #6d675f;
+      --line: #d7d0c2;
+      --good: #2f6b4f;
+      --warn: #9a5b16;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+    header {
+      padding: 28px 24px 22px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #fffdfa 0%, var(--paper) 100%);
+    }
+    .wrap { max-width: 1080px; margin: 0 auto; }
+    h1, h2, h3 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+    }
+    h1 { font-size: clamp(28px, 4vw, 42px); line-height: 1.1; }
+    h2 { font-size: 22px; margin-top: 0; }
+    .description { font-size: 18px; max-width: 760px; color: var(--muted); margin: 0 0 14px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 5px 11px;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    main { padding: 26px 24px 40px; }
+    .grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 20px; }
+    @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: #fffdfa;
+      border: 1px solid var(--sand);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 8px 24px rgba(28, 26, 23, 0.04);
+    }
+    label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 5px; }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+    }
+    textarea { min-height: 96px; resize: vertical; }
+    input[type=password] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button {
+      border: 0;
+      border-radius: 9px;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--burgundy);
+      color: #fff;
+    }
+    button.secondary { background: var(--ink); }
+    button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    .row > * { flex: 1 1 180px; }
+    .row button { flex: 0 0 auto; }
+    .actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .messages {
+      border: 1px solid var(--sand);
+      border-radius: 10px;
+      background: #fff;
+      padding: 12px;
+      height: 330px;
+      overflow-y: auto;
+      font-size: 14px;
+    }
+    .msg { margin: 0 0 10px; padding: 9px 11px; border-radius: 9px; background: #f5f2ec; }
+    .msg.user { background: #efe8df; }
+    .msg.assistant { background: #faf7f2; border-left: 3px solid var(--burgundy); }
+    .msg.tool { background: #eef2ef; border-left: 3px solid var(--good); font-family: ui-monospace, monospace; font-size: 12px; }
+    .note { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+    .output {
+      margin-top: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #f7f4ee;
+      border: 1px solid var(--sand);
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 13px;
+      min-height: 90px;
+    }
+    a { color: var(--burgundy); }
+    details { margin-top: 18px; border-top: 1px solid var(--sand); padding-top: 14px; }
+    summary { cursor: pointer; font-weight: 600; }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #1c1a17;
+      color: #f5f2ec;
+      padding: 14px;
+      border-radius: 10px;
+      font-size: 12px;
+      max-height: 340px;
+      overflow: auto;
+    }
+    .footer {
+      margin-top: 26px;
+      padding-top: 18px;
+      border-top: 1px solid var(--sand);
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .watermark { font-weight: 600; color: var(--ink); }
+    .cta { display: inline-block; margin-top: 10px; }
+    .pill { color: var(--good); font-weight: 600; }
+    .err { color: #a32638; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Stripe & E-Commerce Refund Guard</h1>
+      <p class="description">Every customer refund and charge gets one human yes before it happens.</p>
+      <div class="badges">
+        <span class="badge">Public</span>
+        <span class="badge">Grant consent gate</span>
+        <span class="badge">OpenAPI action</span>
+        <span class="badge">Remote MCP ready</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="grid">
+      <section class="card">
+        <h2>Assistant chat</h2>
+        <p class="note">Live chat is optional. Add your own Hugging Face token to call a model; nothing is stored. The Grant gate controls below work without a token.</p>
+        <div class="row">
+          <div>
+            <label for="token">Hugging Face token (optional, not stored)</label>
+            <input id="token" type="password" placeholder="hf_..." autocomplete="off" />
+          </div>
+          <div>
+            <label for="model">Model</label>
+            <input id="model" type="text" value="openai/gpt-oss-120b" />
+          </div>
+        </div>
+        <div id="messages" class="messages" aria-live="polite">
+          <div class="msg assistant">I draft and review. I never send, refund, charge, or pay out until a human approves through Grant.</div>
+        </div>
+        <label for="prompt">Message</label>
+        <textarea id="prompt" placeholder="A customer says their order arrived damaged. Draft the reply and ask me before refunding."></textarea>
+        <div class="actions">
+          <button id="send">Send message</button>
+          <button id="clear" class="ghost">Clear chat</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Grant approval checkpoint</h2>
+        <p class="note">Enter an order reference and amount only. No card numbers, emails, names, or Stripe keys are ever sent to Grant.</p>
+        <div id="gateFields"></div>
+        <div class="actions">
+          <button id="createApproval" class="secondary">Create approval</button>
+          <button id="checkApproval" class="ghost">Check &amp; verify</button>
+        </div>
+        <div id="output" class="output">No approval request created yet.</div>
+        <p class="note">Grant OpenAPI: <a href="https://grant-approve.vercel.app/openapi.json" target="_blank" rel="noreferrer">openapi.json</a> · Privacy: <a href="https://grant-approve.vercel.app/privacy" target="_blank" rel="noreferrer">privacy</a></p>
+      </section>
+    </div>
+
+    <details>
+      <summary>System instructions (exact blueprint copy)</summary>
+      <pre id="systemPrompt"></pre>
+      <button id="copyPrompt" class="ghost">Copy system instructions</button>
+    </details>
+
+    <details>
+      <summary>Tools / OpenAPI action</summary>
+      <p class="note">Attached schema: <a href="https://grant-approve.vercel.app/openapi.json" target="_blank" rel="noreferrer">https://grant-approve.vercel.app/openapi.json</a></p>
+      <p class="note">Enabled actions: <span class="pill">createApproval</span> · <span class="pill">getApproval</span> · <span class="pill">verifyReceipt</span></p>
+      <p class="note">Remote MCP (where supported): <code>https://grant-approve.vercel.app/api/mcp</code></p>
+    </details>
+
+    <div class="footer">
+      <div class="watermark">● Protected by Grant · Zero-custody consent infrastructure</div>
+      <div>Grant never sees your credentials or payment details. It only records what you allowed.</div>
+      <a class="cta" href="https://grant-approve.vercel.app/" target="_blank" rel="noreferrer">Get Your Free API Key →</a>
+    </div>
+  </main>
+
+  <script>
+    const NAME = "Stripe & E-Commerce Refund Guard";
+    const DESCRIPTION = "Every customer refund and charge gets one human yes before it happens.";
+    const SYSTEM_PROMPT = "You are the Stripe & E-Commerce Refund Guard. You help merchants review refund requests, disputes, and charge adjustments. You explain the decision in plain language and never move money without explicit human approval.\n\nHARD RULE — GRANT GATE BEFORE ANY MONEY ACTION\nBefore you call any tool that issues a refund, creates a charge, captures a payment, cancels a subscription, or triggers a payout, you MUST create a Grant approval checkpoint:\n\n1. Call Grant createApproval (POST /v1/approvals) with:\n   - agent_name: \"refund-guard-assistant\"\n   - tool_name: the exact tool you intend to call (for example \"issue_refund\")\n   - summary: one plain sentence with the order reference and amount only. Never include card numbers, emails, addresses, or customer names.\n   - scope: only non-sensitive metadata such as {\"order_ref\": \"ORD-4821\", \"amount\": 48, \"currency\": \"USD\"}. Never include Stripe keys, tokens, card data, or full customer records.\n2. If status is \"approved\" and signed_receipt is present, verify it with Grant verifyReceipt (POST /v1/receipts/verify). Continue only when valid is true and decision_type is an allowing value.\n3. If status is \"pending\", stop. Show the user the approval_url as a clickable link and say: \"Approve this in the Grant pop-up, then tell me to continue.\" Do not touch money yet.\n4. If the human rejects, cancels, or the receipt is invalid, do not issue the refund or charge. Explain that the action was not approved.\n5. After a verified approval, call the money tool exactly once and report the Grant request_id.\n\nNEVER issue a refund, charge, or payout before steps 1-4 complete. If no payment tool is connected, prepare the request and offer the Grant link — never claim the money moved.\n\nPRIVACY\nGrant never sees your credentials or payment details. It only records what you allowed. Never ask for a Stripe secret key, card number, CVV, bank details, or raw customer PII. Never put those values in an approval summary, scope, or tool call.\n\nJUDGMENT\nFlag duplicate refunds, mismatched amounts, and requests outside the store's stated policy. Ask for clarification instead of guessing. Never fabricate an order, payment, or receipt.\n\nBRAND\nWhen explaining the gate, use: \"● Protected by Grant · Zero-custody consent infrastructure\". Link to https://grant-approve.vercel.app/privacy for the privacy policy.";
+    const AGENT = "refund-guard-assistant";
+    const KIND = "refund";
+    const OPENAPI = "https://grant-approve.vercel.app/openapi.json";
+    const GRANT = "https://grant-approve.vercel.app";
+    const ROUTER = "https://router.huggingface.co/v1/chat/completions";
+
+    const TOOLS = [
+      {
+        type: "function",
+        function: {
+          name: "createApproval",
+          description: "Create a Grant human approval checkpoint before any sending or money action.",
+          parameters: {
+            type: "object",
+            properties: {
+              agent: { type: "string" },
+              action: { type: "string" },
+              summary: { type: "string", description: "Non-sensitive metadata only." },
+              scope: { type: "object", description: "Non-sensitive metadata only." }
+            },
+            required: ["agent", "action", "summary"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "getApproval",
+          description: "Poll a Grant approval request and its signed receipt.",
+          parameters: {
+            type: "object",
+            properties: { request_id: { type: "string" } },
+            required: ["request_id"]
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "verifyReceipt",
+          description: "Verify a signed Grant receipt before acting.",
+          parameters: {
+            type: "object",
+            properties: {
+              signed_receipt: { type: "string" },
+              request_id: { type: "string" }
+            },
+            required: ["signed_receipt"]
+          }
+        }
+      }
+    ];
+
+    const $ = (id) => document.getElementById(id);
+    let history = [];
+    let lastRequestId = "";
+
+    function addMessage(text, role = "assistant") {
+      const div = document.createElement("div");
+      div.className = "msg " + role;
+      div.textContent = text;
+      $("messages").appendChild(div);
+      $("messages").scrollTop = $("messages").scrollHeight;
+    }
+
+    function setOutput(text) { $("output").textContent = text; }
+
+    function buildGateFields() {
+      if (KIND === "email") {
+        $("gateFields").innerHTML = `
+          <label for="toolName">Sending tool to gate</label>
+          <input id="toolName" value="send_email" />
+          <label for="domain">Recipient domain (metadata only)</label>
+          <input id="domain" placeholder="example.com" />
+        `;
+      } else {
+        $("gateFields").innerHTML = `
+          <label for="toolName">Money tool to gate</label>
+          <input id="toolName" value="issue_refund" />
+          <div class="row">
+            <div>
+              <label for="orderRef">Order reference</label>
+              <input id="orderRef" placeholder="ORD-4821" />
+            </div>
+            <div>
+              <label for="amount">Amount</label>
+              <input id="amount" type="number" min="0" step="0.01" placeholder="48" />
+            </div>
+            <div>
+              <label for="currency">Currency</label>
+              <input id="currency" value="USD" />
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function approvalPayload() {
+      const toolName = $("toolName").value.trim();
+      if (KIND === "email") {
+        const domain = $("domain").value.trim();
+        if (!domain) throw new Error("Enter a recipient domain only — no email address.");
+        return {
+          agent: AGENT,
+          action: toolName || "send_email",
+          summary: `Grant gate requested for an email draft to ${domain}; nothing has been sent.`,
+          scope: { recipient_count: 1, channel: "email" }
+        };
+      }
+      const orderRef = $("orderRef").value.trim();
+      const amount = $("amount").value.trim();
+      const currency = $("currency").value.trim().toUpperCase() || "USD";
+      if (!orderRef || !amount) throw new Error("Enter an order reference and amount only — no customer details.");
+      return {
+        agent: AGENT,
+        action: toolName || "issue_refund",
+        summary: `Grant gate requested for ${currency} ${amount} on order ${orderRef}; no money has moved.`,
+        scope: { order_ref: orderRef, amount: Number(amount), currency }
+      };
+    }
+
+    async function grantFetch(path, options = {}) {
+      const res = await fetch(GRANT + path, {
+        ...options,
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 2000) }; }
+      if (!res.ok) throw new Error(data?.detail?.error || data?.detail || `HTTP ${res.status}`);
+      return data;
+    }
+
+    async function callCreateApproval(payload) {
+      return grantFetch("/v1/approvals", { method: "POST", body: JSON.stringify(payload) });
+    }
+
+    async function callGetApproval(requestId) {
+      return grantFetch(`/v1/approvals/${encodeURIComponent(requestId)}`);
+    }
+
+    async function callVerifyReceipt(signedReceipt, requestId) {
+      const body = { signed_receipt: signedReceipt };
+      if (requestId) body.request_id = requestId;
+      return grantFetch("/v1/receipts/verify", { method: "POST", body: JSON.stringify(body) });
+    }
+
+    function formatApproval(data) {
+      const lines = [
+        "Grant checkpoint created.",
+        `request_id: ${data.request_id || data.req_id || "(not returned)"}`,
+        `status: ${data.status || "pending"}`,
+        data.approval_url ? `approval_url: ${data.approval_url}` : "approval_url: (not returned)"
+      ];
+      if (data.signed_receipt) lines.push("signed_receipt: present");
+      lines.push("", "Approve in the Grant pop-up, then click Check & verify. Nothing was sent or charged.");
+      return lines.join("\n");
+    }
+
+    async function handleCreate() {
+      try {
+        const payload = approvalPayload();
+        const data = await callCreateApproval(payload);
+        lastRequestId = data.request_id || data.req_id || "";
+        setOutput(formatApproval(data));
+        addMessage(`Grant checkpoint created (${lastRequestId || "pending"}). I stopped here.`, "assistant");
+        if (data.approval_url) addMessage(`Approval link: ${data.approval_url}`, "tool");
+      } catch (e) {
+        setOutput("Grant approval failed: " + e.message);
+      }
+    }
+
+    async function handleCheck() {
+      const id = ($("requestId") ? $("requestId").value.trim() : "") || lastRequestId;
+      if (!id) { setOutput("Create an approval first, or enter a request_id."); return; }
+      try {
+        const data = await callGetApproval(id);
+        const receipt = data.signed_receipt || data.receipt || "";
+        const lines = [
+          `request_id: ${id}`,
+          `status: ${data.status || "(unknown)"}`,
+          receipt ? "signed_receipt: present" : "signed_receipt: not present yet"
+        ];
+        if (receipt) {
+          const verified = await callVerifyReceipt(receipt, id);
+          lines.push(`valid: ${verified.valid}`);
+          if (verified.decision_type) lines.push(`decision_type: ${verified.decision_type}`);
+          lines.push(verified.valid ? "Verified. You may now call the gated tool exactly once." : "Receipt invalid. Do not act.");
+          addMessage(verified.valid ? `Grant receipt verified for ${id}.` : `Grant receipt invalid for ${id}.`, "tool");
+        } else {
+          lines.push("Still pending. Do not act until a human approves.");
+        }
+        setOutput(lines.join("\n"));
+      } catch (e) {
+        setOutput("Grant check failed: " + e.message);
+      }
+    }
+
+    async function runToolCall(toolCall) {
+      const name = toolCall.function?.name;
+      let args = {};
+      try { args = JSON.parse(toolCall.function?.arguments || "{}"); } catch {}
+      if (name === "createApproval") {
+        const data = await callCreateApproval(args);
+        lastRequestId = data.request_id || data.req_id || "";
+        const summary = formatApproval(data);
+        addMessage(summary, "tool");
+        return { tool_call_id: toolCall.id, role: "tool", content: JSON.stringify(data) };
+      }
+      if (name === "getApproval") {
+        const data = await callGetApproval(args.request_id || args.id || lastRequestId);
+        addMessage(JSON.stringify(data, null, 2), "tool");
+        return { tool_call_id: toolCall.id, role: "tool", content: JSON.stringify(data) };
+      }
+      if (name === "verifyReceipt") {
+        const data = await callVerifyReceipt(args.signed_receipt, args.request_id || lastRequestId);
+        addMessage(JSON.stringify(data, null, 2), "tool");
+        return { tool_call_id: toolCall.id, role: "tool", content: JSON.stringify(data) };
+      }
+      const content = JSON.stringify({ error: `Unknown tool ${name}` });
+      addMessage(content, "tool");
+      return { tool_call_id: toolCall.id, role: "tool", content };
+    }
+
+    async function sendMessage() {
+      const prompt = $("prompt").value.trim();
+      if (!prompt) return;
+      $("prompt").value = "";
+      addMessage(prompt, "user");
+      const token = $("token").value.trim();
+      if (!token) {
+        addMessage("Add a Hugging Face token to enable live model chat. The Grant gate below remains available and no send/refund tool is connected here.", "assistant");
+        return;
+      }
+      history.push({ role: "user", content: prompt });
+      try {
+        const res = await fetch(ROUTER, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            model: $("model").value.trim() || "openai/gpt-oss-120b",
+            messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
+            tools: TOOLS,
+            tool_choice: "auto",
+            max_tokens: 900
+          })
+        });
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error(text.slice(0, 500)); }
+        if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+        const message = data.choices?.[0]?.message || {};
+        if (message.content) { addMessage(message.content, "assistant"); history.push(message); }
+        if (message.tool_calls?.length) {
+          for (const call of message.tool_calls) {
+            const toolMessage = await runToolCall(call);
+            history.push(message, toolMessage);
+          }
+          addMessage("Grant tool result added above. Nothing was sent or charged unless a verified receipt is shown.", "assistant");
+        }
+      } catch (e) {
+        addMessage("Model request failed: " + e.message, "assistant");
+      }
+    }
+
+    $("systemPrompt").textContent = SYSTEM_PROMPT;
+    buildGateFields();
+    $("send").addEventListener("click", sendMessage);
+    $("clear").addEventListener("click", () => {
+      history = [];
+      $("messages").innerHTML = '<div class="msg assistant">I draft and review. I never send, refund, charge, or pay out until a human approves through Grant.</div>';
+    });
+    $("createApproval").addEventListener("click", handleCreate);
+    $("checkApproval").addEventListener("click", handleCheck);
+    $("copyPrompt").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(SYSTEM_PROMPT); $("copyPrompt").textContent = "Copied"; }
+      catch { $("copyPrompt").textContent = "Copy failed"; }
+    });
+    $("prompt").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendMessage(); }
+    });
+  </script>
+</body>
+</html>

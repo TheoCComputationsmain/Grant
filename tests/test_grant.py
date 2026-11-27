@@ -1914,6 +1914,21 @@ def test_public_openapi_31_is_aliased_and_cors_enabled(api):
         assert document["x-grant"]["demo_limit_per_hour"] == main.DEMO_LIMIT_PER_HOUR
 
 
+def test_server_json_declares_schema_website_and_icon():
+    document = json.loads(
+        (Path(__file__).resolve().parents[1] / "server.json").read_text(encoding="utf-8")
+    )
+    assert document["$schema"].endswith("/2025-12-11/server.schema.json")
+    assert document["websiteUrl"] == "https://grant-approve.vercel.app"
+    assert document["icons"] == [
+        {
+            "src": "https://grant-approve.vercel.app/icons/icon-512.svg",
+            "mimeType": "image/svg+xml",
+            "sizes": ["512x512"],
+        }
+    ]
+
+
 def test_mcp_implements_json_rpc_methods_and_tools(api, monkeypatch):
     counter = {"value": 0}
 
@@ -1944,6 +1959,24 @@ def test_mcp_implements_json_rpc_methods_and_tools(api, monkeypatch):
         "request_human_approval",
         "check_approval_status",
     }
+
+    for tool in listing["result"]["tools"]:
+        properties = tool["inputSchema"]["properties"]
+        assert properties, tool["name"]
+        for prop, definition in properties.items():
+            description = definition.get("description")
+            assert isinstance(description, str) and len(description) >= 40, (
+                tool["name"],
+                prop,
+            )
+        annotations = tool["annotations"]
+        if tool["name"] in {"grant.request_approval", "request_human_approval"}:
+            assert annotations["readOnlyHint"] is False
+            assert annotations["destructiveHint"] is False
+            assert annotations["openWorldHint"] is True
+        else:
+            assert annotations["readOnlyHint"] is True
+            assert annotations["idempotentHint"] is True
 
     created = api.post(
         "/api/mcp",
