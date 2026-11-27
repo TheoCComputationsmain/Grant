@@ -1808,6 +1808,41 @@ def test_production_console_fallback_never_leaks_magic_links():
         )
 
 
+def test_agentmail_provider_is_selected_from_api_key():
+    from grant import emailer
+
+    assert (
+        emailer.provider_name({"AGENTMAIL_API_KEY": "am_test"}, production=True)
+        == "agentmail"
+    )
+
+
+def test_agentmail_magic_link_uses_configured_inbox(monkeypatch):
+    from grant import emailer
+
+    calls = []
+
+    def fake_request(api_key, method, path, payload=None):
+        calls.append((api_key, method, path, payload))
+        return {}
+
+    monkeypatch.setattr(emailer, "_agentmail_request", fake_request)
+    provider = emailer.send_magic_link(
+        "reader@example.test",
+        "https://grant.test/auth/verify?token=one-time",
+        env={
+            "VERCEL": "1",
+            "AGENTMAIL_API_KEY": "am_test",
+            "GRANT_AGENTMAIL_INBOX": "grant@agentmail.to",
+        },
+    )
+    assert provider == "agentmail"
+    assert calls[0][1] == "POST"
+    assert calls[0][2] == "/inboxes/grant%40agentmail.to/messages/send"
+    assert calls[0][3]["to"] == "reader@example.test"
+    assert "one-time" in calls[0][3]["text"]
+
+
 def test_test_webhook_is_disabled_in_production(api, monkeypatch):
     monkeypatch.setattr(main, "IS_PRODUCTION", True)
     monkeypatch.setattr(main, "ALLOW_TEST_WEBHOOK", False)

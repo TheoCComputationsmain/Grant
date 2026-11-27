@@ -20,7 +20,9 @@ Set these in Vercel Production:
 | `GRANT_ALLOW_HTTP_UPSTREAMS` | No | Set `true` only if production must allow `http://` upstreams |
 | `GRANT_APP_ENV` | Recommended | `development` or `production`. Vercel sets `VERCEL=1`, which is always treated as production; production requires `DATABASE_URL` and a configured email provider |
 | `GRANT_ALLOW_SQLITE_IN_PROD` | No | Escape hatch only; set `true` to explicitly allow ephemeral SQLite in production |
-| `GRANT_EMAIL_PROVIDER` | No | `resend`, `smtp`, or `console`. Auto-detected from the credentials below; required in production for magic links and email OTP |
+| `GRANT_EMAIL_PROVIDER` | No | `agentmail`, `resend`, `smtp`, or `console`. Auto-detected from the credentials below; required in production for magic links and email OTP |
+| `AGENTMAIL_API_KEY` | For sign-in email | AgentMail API key, injected by the Vercel Marketplace integration; no custom domain required |
+| `GRANT_AGENTMAIL_INBOX` | No | AgentMail inbox to send from. Grant creates a stable inbox automatically when omitted |
 | `RESEND_API_KEY` | For sign-in email | Resend API key for magic links and email OTP |
 | `GRANT_EMAIL_FROM` | For sign-in email | Verified From address for Resend or SMTP |
 | `SMTP_HOST` / `SMTP_PORT` | For sign-in email | SMTP server and port (default `587`) |
