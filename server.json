@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.TheoCComputationsmain/grant-consent",
+  "title": "Grant · Human-in-the-loop approvals",
+  "description": "Zero-custody human approval checkpoints for AI agents.",
+  "repository": {
+    "url": "https://github.com/TheoCComputationsmain/Grant",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://grant-approve.vercel.app/api/mcp"
+    }
+  ]
+}
