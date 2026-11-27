@@ -1,0 +1,138 @@
+# Grant · Smithery URL-publishing metadata
+# This is zero-install metadata. Smithery's URL flow scans the live Streamable
+# HTTP endpoint at https://grant-consent.vercel.app/api/mcp; there is no
+# Dockerfile, no local command, and no npm/pip install step.
+name: "@grant/consent"
+display_name: "Grant · Human-in-the-loop approvals"
+version: "0.1.0"
+description: >-
+  Consent infrastructure for AI agents. Grant pauses a proposed tool call,
+  sends one private approval link to a human, and returns a signed receipt.
+  Grant never sees credentials, payment details, raw scope values, or raw PII.
+homepage: "https://grant-consent.vercel.app"
+docs: "https://grant-consent.vercel.app/docs"
+privacy_policy: "https://grant-consent.vercel.app/privacy"
+openapi: "https://grant-consent.vercel.app/openapi.json"
+
+remote:
+  transport: "streamable-http"
+  url: "https://grant-consent.vercel.app/api/mcp"
+  protocol_version: "2025-06-18"
+  methods:
+    - initialize
+    - notifications/initialized
+    - tools/list
+    - tools/call
+  setup_page: "https://grant-consent.vercel.app/api/mcp"
+
+installation:
+  required: false
+  local_command: null
+  environment_variables: []
+
+authentication:
+  mode: "optional-bearer"
+  header: "Authorization"
+  format: "Bearer gr_live_..."
+  demo_mode: "20 calls/hour without a key"
+  configuration_hint: "Users can paste a Grant key in MCP client settings; no Smithery config form is needed."
+
+tags:
+  - security
+  - human-in-the-loop
+  - approvals
+  - guardrails
+  - payments
+  - zero-custody
+
+tools:
+  - name: request_human_approval
+    aliases:
+      - grant.request_approval
+    description: >-
+      Create one scoped human checkpoint. Returns a private approval URL and a
+      request ID. Grant stores a hash of the redacted scope, never the raw scope.
+    input_schema:
+      type: object
+      properties:
+        agent_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: "The agent or assistant asking permission."
+        tool_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: "The tool or action that needs approval."
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: "One plain-language sentence a human can decide on."
+        scope:
+          type: object
+          default: {}
+          description: "Redacted metadata only; no credentials, card data, or raw PII."
+        workspace:
+          type: string
+          maxLength: 60
+          description: "Optional workspace label."
+        callback_url:
+          type: string
+          maxLength: 500
+          description: "Optional HTTPS URL for a decision callback."
+        callback_secret:
+          type: string
+          maxLength: 200
+          description: "Optional callback signing secret; never echoed back."
+      required:
+        - agent_name
+        - tool_name
+        - summary
+    example_input:
+      agent_name: "support-agent"
+      tool_name: "issue_refund"
+      summary: "Refund order ORD-4821 for $48.00"
+      scope:
+        order_id: "ORD-4821"
+        amount: 48
+      workspace: "support"
+    example_output:
+      request_id: "req_8Kx2mQ1pL"
+      status: "pending"
+      approval_url: "https://grant-consent.vercel.app/a/req_8Kx2mQ1pL"
+      receipt_url: "/receipt/req_8Kx2mQ1pL"
+      expires_at: "2026-11-27T10:21:00Z"
+      scope_hash: "9f2c..."
+
+  - name: check_approval_status
+    aliases:
+      - grant.get_request
+    description: >-
+      Read the public status, decision, and signed receipt of one Grant request.
+      Receipts contain no scope values.
+    input_schema:
+      type: object
+      properties:
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: "The request_id returned by request_human_approval."
+      required:
+        - request_id
+    example_input:
+      request_id: "req_8Kx2mQ1pL"
+    example_output:
+      request_id: "req_8Kx2mQ1pL"
+      status: "decided"
+      decision: "approve"
+      decision_type: "continue_once"
+      receipt_verified: true
+      signed_receipt: "eyJyZXF1ZXN0X2lkIjo..."
+      receipt_url: "/receipt/req_8Kx2mQ1pL"
+
+notes:
+  - "Stateless JSON-RPC over POST; clients should not send mcp-session-id headers."
+  - "Public endpoints return Cache-Control: no-store and never include raw PII."

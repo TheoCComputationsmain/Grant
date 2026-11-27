@@ -1,0 +1,301 @@
+{
+  "name": "Grant · Human approval gate",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "grant-gate",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "grant-trigger-0000000001",
+      "name": "Grant Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "grant-gate"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://grant-consent.vercel.app/v1/approvals",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $env.GRANT_API_KEY ? 'Bearer ' + $env.GRANT_API_KEY : '' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ agent_name: $json.body?.agent || 'n8n-workflow', tool_name: $json.body?.tool || $json.body?.action || 'protected_action', summary: $json.body?.summary || 'Request human approval before the protected action', scope: { action: $json.body?.tool || $json.body?.action || 'protected_action', reference: $json.body?.reference || '' }, workspace: $json.body?.workspace || 'public' }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "grant-approval-0000000002",
+      "name": "Request Grant Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "grant-status-approved",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "grant-if-approved-00000003",
+      "name": "Was Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://grant-consent.vercel.app/v1/receipts/verify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ signed_receipt: $json.signed_receipt, request_id: $json.request_id }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "grant-verify-0000000004",
+      "name": "Verify Signed Receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "grant-receipt-valid",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "grant-if-valid-000000005",
+      "name": "Receipt Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1200, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PROTECTED_ACTION_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Grant-Request-Id",
+              "value": "={{ $('Request Grant Approval').first().json.request_id }}"
+            },
+            {
+              "name": "X-Grant-Receipt",
+              "value": "={{ $('Request Grant Approval').first().json.signed_receipt }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ grant_request_id: $('Request Grant Approval').first().json.request_id, grant_receipt_verified: true, payload: $('Grant Trigger').first().json.body }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "grant-protected-action-000006",
+      "name": "Protected Downstream Action",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 120]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'executed', grant_request_id: $('Request Grant Approval').first().json.request_id, receipt_url: $('Request Grant Approval').first().json.receipt_url, downstream: $json }) }}",
+        "options": {}
+      },
+      "id": "grant-return-decision-00007",
+      "name": "Return Decision",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1680, 120]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'approval_required', request_id: $json.request_id, approval_url: $json.approval_url, receipt_url: $json.receipt_url, expires_at: $json.expires_at, message: 'Open the Grant pop-up and approve, then retry this webhook.' }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "grant-return-checkpoint-0008",
+      "name": "Return Checkpoint",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'receipt_invalid', request_id: $('Request Grant Approval').first().json.request_id, message: 'Grant could not verify the signed receipt. Do not run the protected action.' }) }}",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "grant-return-invalid-0000009",
+      "name": "Return Receipt Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1440, 320]
+    }
+  ],
+  "connections": {
+    "Grant Trigger": {
+      "main": [
+        [
+          {
+            "node": "Request Grant Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Grant Approval": {
+      "main": [
+        [
+          {
+            "node": "Was Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Was Approved?": {
+      "main": [
+        [
+          {
+            "node": "Verify Signed Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Checkpoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signed Receipt": {
+      "main": [
+        [
+          {
+            "node": "Receipt Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Receipt Valid?": {
+      "main": [
+        [
+          {
+            "node": "Protected Downstream Action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Receipt Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Protected Downstream Action": {
+      "main": [
+        [
+          {
+            "node": "Return Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "active": false,
+  "tags": []
+}

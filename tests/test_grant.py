@@ -89,6 +89,11 @@ def test_health_home_and_docs(api):
     assert "https://grant.test/v1/requests" not in docs.text
     assert "/v1/permissions/verify" in docs.text
 
+    privacy = api.get("/privacy")
+    assert privacy.status_code == 200
+    assert "zero-custody" in privacy.text
+    assert PRIVACY_LINE in privacy.text
+
 
 def test_create_request_returns_approval_message(api):
     body = create(api, agent="message-agent", action="send_a_summary")
@@ -1843,6 +1848,35 @@ def test_agentmail_magic_link_uses_configured_inbox(monkeypatch):
     assert "one-time" in calls[0][3]["text"]
 
 
+def test_approvals_alias_and_receipt_verification(api, monkeypatch):
+    monkeypatch.setattr(main.telemetry, "ip_hash", lambda request: "approvals-alias-ip")
+    response = api.post(
+        "/v1/approvals",
+        json={
+            "agent_name": "alias-agent",
+            "tool_name": "send_note",
+            "reason": "Check the unified approval endpoint",
+            "scope": {"channel": "team"},
+        },
+    )
+    assert response.status_code in {201, 202}
+    body = response.json()
+    assert body["request_id"] == body["id"]
+    assert body["approval_url"]
+    assert body["receipt_url"] == f"/receipt/{body['id']}"
+
+    status = api.get(f"/v1/approvals/{body['id']}").json()
+    assert status["request_id"] == body["id"]
+    assert status["receipt_url"] == f"/receipt/{body['id']}"
+
+    bad = api.post(
+        "/v1/receipts/verify",
+        json={"signed_receipt": "not-a-receipt", "request_id": body["id"]},
+    ).json()
+    assert bad["valid"] is False
+    assert bad["request_id_matches"] is False
+
+
 def test_test_webhook_is_disabled_in_production(api, monkeypatch):
     monkeypatch.setattr(main, "IS_PRODUCTION", True)
     monkeypatch.setattr(main, "ALLOW_TEST_WEBHOOK", False)
@@ -1904,7 +1938,12 @@ def test_mcp_implements_json_rpc_methods_and_tools(api, monkeypatch):
         "/api/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
     ).json()
     names = {tool["name"] for tool in listing["result"]["tools"]}
-    assert names == {"grant.request_approval", "grant.get_request"}
+    assert names == {
+        "grant.request_approval",
+        "grant.get_request",
+        "request_human_approval",
+        "check_approval_status",
+    }
 
     created = api.post(
         "/api/mcp",

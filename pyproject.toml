@@ -38,3 +38,6 @@ packages = ["grant", "grant.assets", "grant.policies"]
 
 [tool.setuptools.package-data]
 grant = ["assets/*.js", "policies/*.json"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "grant": {
+      "url": "https://grant-consent.vercel.app/api/mcp",
+      "transport": "streamable-http",
+      "type": "http",
+      "disabled": false,
+      "autoApprove": [],
+      "timeout": 30,
+      "headers": {}
+    }
+  }
+}

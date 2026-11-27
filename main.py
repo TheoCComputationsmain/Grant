@@ -709,6 +709,11 @@ class VerifyIn(BaseModel):
     signature: str = Field(min_length=1, max_length=160)
 
 
+class ReceiptVerifyIn(BaseModel):
+    signed_receipt: str = Field(min_length=1, max_length=8000)
+    request_id: str = Field(default="", max_length=120)
+
+
 class A2AGateIn(BaseModel):
     """A task handoff between agents that may need a human decision."""
 
@@ -4458,6 +4463,21 @@ async def docs() -> HTMLResponse:
     return HTMLResponse(docs_page(), headers={"Cache-Control": "public, s-maxage=60"})
 
 
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy() -> HTMLResponse:
+    body = """
+<section class="hero"><span class="eyebrow"><span class="dot"></span> Privacy</span>
+<h1>Grant sees the decision. Not your secrets.</h1>
+<p class="sub">Grant is zero-custody consent infrastructure. A checkpoint records who asked, what was proposed, when it expires, and what the human decided. It never receives credentials, payment details, or raw PII, and it never stores your scope values. It stores only a one-way hash of the redacted scope.</p>
+<p class="sub">Signed receipts contain a request ID, decision, agent name, tool name, scope hash, and timestamp — no raw scope values. Every public integration endpoint follows the same rule.</p>
+<div class="actions"><a class="btn" href="/start">Get Your Free API Key →</a><a class="btn ghost" href="/docs">How it works</a><a class="btn ghost" href="/openapi.json">Public API contract</a></div>
+<p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p></section>"""
+    return HTMLResponse(
+        page("Privacy · Grant", body, "Grant records what you allowed, never your credentials or payment details."),
+        headers={"Cache-Control": "public, s-maxage=300"},
+    )
+
+
 @app.get("/pricing", response_class=HTMLResponse)
 async def pricing(org_id: str = "") -> HTMLResponse:
     return HTMLResponse(pricing_page(org_id))
@@ -5811,36 +5831,40 @@ def _receipt_response(
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_REQUEST_TOOL = {
+    "name": "grant.request_approval",
+    "description": (
+        "Create one scoped human checkpoint. Returns a private approval URL; "
+        "Grant never receives credentials or payment details."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "agent_name": {"type": "string", "minLength": 1, "maxLength": 120},
+            "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+            "scope": {"type": "object", "default": {}},
+            "workspace": {"type": "string", "maxLength": 60},
+            "callback_url": {"type": "string", "maxLength": 500},
+            "callback_secret": {"type": "string", "maxLength": 200},
+        },
+        "required": ["agent_name", "tool_name", "summary"],
+    },
+}
+MCP_STATUS_TOOL = {
+    "name": "grant.get_request",
+    "description": "Read the public status and signed receipt of one Grant request.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"request_id": {"type": "string", "minLength": 1, "maxLength": 120}},
+        "required": ["request_id"],
+    },
+}
 MCP_TOOLS = (
-    {
-        "name": "grant.request_approval",
-        "description": (
-            "Create one scoped human checkpoint. Returns a private approval URL; "
-            "Grant never receives credentials or payment details."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "agent_name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "summary": {"type": "string", "minLength": 1, "maxLength": 500},
-                "scope": {"type": "object", "default": {}},
-                "workspace": {"type": "string", "maxLength": 60},
-                "callback_url": {"type": "string", "maxLength": 500},
-                "callback_secret": {"type": "string", "maxLength": 200},
-            },
-            "required": ["agent_name", "tool_name", "summary"],
-        },
-    },
-    {
-        "name": "grant.get_request",
-        "description": "Read the public status and signed receipt of one Grant request.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"request_id": {"type": "string", "minLength": 1, "maxLength": 120}},
-            "required": ["request_id"],
-        },
-    },
+    MCP_REQUEST_TOOL,
+    MCP_STATUS_TOOL,
+    {**MCP_REQUEST_TOOL, "name": "request_human_approval"},
+    {**MCP_STATUS_TOOL, "name": "check_approval_status"},
 )
 
 
@@ -5952,6 +5976,66 @@ def public_openapi_document() -> dict[str, Any]:
                     },
                 }
             },
+            "/v1/approvals": {
+                "post": {
+                    "tags": ["Gate"],
+                    "summary": "Unified approval checkpoint for gateways and framework adapters",
+                    "operationId": "createApproval",
+                    "security": [{"GrantLiveKey": []}, {}],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GateRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "201": ok_json,
+                        "202": ok_json,
+                        "402": error_json,
+                        "403": error_json,
+                        "429": error_json,
+                    },
+                }
+            },
+            "/v1/approvals/{request_id}": {
+                "get": {
+                    "tags": ["Gate"],
+                    "summary": "Poll one approval and its signed receipt",
+                    "operationId": "getApproval",
+                    "parameters": [
+                        {
+                            "name": "request_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": ok_json,
+                        "404": error_json,
+                    },
+                }
+            },
+            "/v1/receipts/verify": {
+                "post": {
+                    "tags": ["Receipts"],
+                    "summary": "Verify a signed Grant receipt",
+                    "operationId": "verifyReceipt",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ReceiptVerifyRequest"
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": ok_json},
+                }
+            },
             "/receipt/{req_id}": {
                 "get": {
                     "tags": ["Receipts"],
@@ -6017,6 +6101,15 @@ def public_openapi_document() -> dict[str, Any]:
                     },
                     "required": ["agent", "action", "summary"],
                     "description": "Aliases agent_name/tool_name/reason/why are accepted.",
+                },
+                "ReceiptVerifyRequest": {
+                    "type": "object",
+                    "properties": {
+                        "signed_receipt": {"type": "string", "minLength": 1, "maxLength": 8000},
+                        "request_id": {"type": "string", "maxLength": 120},
+                    },
+                    "required": ["signed_receipt"],
+                    "description": "Only the signed, minimal receipt is checked; no scope values are returned.",
                 },
                 "GrantError": {
                     "type": "object",
@@ -6119,7 +6212,7 @@ async def mcp(http_request: Request) -> Response:
     tool_name = str(params.get("name", ""))
     args = _mcp_arguments(params)
     try:
-        if tool_name == "grant.request_approval":
+        if tool_name in {"grant.request_approval", "request_human_approval"}:
             agent = str(args.get("agent_name") or args.get("agent") or "").strip()[:120]
             action = str(args.get("tool_name") or args.get("action") or "").strip()[:120]
             summary = str(args.get("summary") or args.get("reason") or args.get("why") or "").strip()[:500]
@@ -6159,7 +6252,7 @@ async def mcp(http_request: Request) -> Response:
                 "expires_at": result["expires_at"],
                 "scope_hash": result["scope_hash"],
             }
-        elif tool_name == "grant.get_request":
+        elif tool_name in {"grant.get_request", "check_approval_status"}:
             request_id = str(args.get("request_id") or "").strip()[:120]
             if not request_id:
                 return mcp_error(mcp_id, -32602, "request_id is required.")
@@ -6187,9 +6280,10 @@ async def mcp(http_request: Request) -> Response:
     return JSONResponse(content={"jsonrpc": "2.0", "id": mcp_id, "result": content})
 
 
-@app.post("/v1/gate/webhook")
-async def gate_webhook(payload: GateWebhookIn, http_request: Request) -> JSONResponse:
-    """Zero-wrapper gate call: rules first, then a quiet human checkpoint."""
+async def _create_gate_checkpoint(
+    payload: GateWebhookIn, http_request: Request
+) -> JSONResponse:
+    """Shared zero-wrapper gate: rules first, then a quiet human checkpoint."""
     principal = validate_bearer_if_present(http_request)
     if not public_call_allowed(http_request, bucket="gate", authorized=bool(principal)):
         raise HTTPException(status_code=429, detail="Demo limit reached. Add a Grant API key.")
@@ -6238,6 +6332,7 @@ async def gate_webhook(payload: GateWebhookIn, http_request: Request) -> JSONRes
         status_code=201 if rule else 202,
         content={
             "id": result["id"],
+            "request_id": result["id"],
             "status": "approved" if rule else "pending",
             "rule_id": str(rule["id"]) if rule else "",
             "approval_url": result["approval_url"],
@@ -6248,6 +6343,64 @@ async def gate_webhook(payload: GateWebhookIn, http_request: Request) -> JSONRes
         },
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/v1/gate/webhook")
+async def gate_webhook(payload: GateWebhookIn, http_request: Request) -> JSONResponse:
+    """Zero-wrapper gate call: rules first, then a quiet human checkpoint."""
+    return await _create_gate_checkpoint(payload, http_request)
+
+
+@app.post("/v1/approvals")
+async def approvals_create(payload: GateWebhookIn, http_request: Request) -> JSONResponse:
+    """Unified approval checkpoint used by gateways and framework adapters."""
+    return await _create_gate_checkpoint(payload, http_request)
+
+
+@app.get("/v1/approvals/{request_id}")
+async def approvals_status(request_id: str) -> JSONResponse:
+    """Poll one approval and return its signed receipt when decided."""
+    row, canonical = _approval_snapshots(request_id[:120])
+    if row is None:
+        raise HTTPException(status_code=404, detail="Grant request not found.")
+    verified, receipt_payload_value = _signed_receipt_for(canonical)
+    body: dict[str, Any] = {
+        "id": row["id"],
+        "request_id": row["id"],
+        "status": str(row_value(canonical, "status", row["status"])),
+        "decision": str(row_value(canonical, "decision", row["decision"]) or ""),
+        "decision_at": str(row_value(canonical, "decision_at", row["decision_at"]) or ""),
+        "expires_at": str(row_value(canonical, "expires_at", row["expires_at"]) or ""),
+        "scope_hash": str(row_value(canonical, "scope_hash", row["scope_hash"]) or ""),
+        "approval_url": str(row_value(canonical, "approval_url", f"/approve/{row['id']}")),
+        "receipt_url": f"/receipt/{row['id']}",
+        "signed_receipt": str(row_value(canonical, "signed_receipt", "") or ""),
+        "receipt_verified": bool(verified),
+        "receipt": receipt_payload_value or {},
+    }
+    permission = get_permission_by_request(str(row["id"]))
+    if permission:
+        body["permission"] = permission_dict(permission)
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/v1/receipts/verify")
+async def receipts_verify(payload: ReceiptVerifyIn) -> JSONResponse:
+    """Verify a signed Grant receipt without revealing raw scope values."""
+    verified, receipt = verify_signed_receipt(payload.signed_receipt[:8000])
+    valid = bool(verified and isinstance(receipt, dict))
+    body: dict[str, Any] = {
+        "valid": valid,
+        "status": str(receipt.get("status", "")) if valid and receipt else "",
+        "request_id": str(receipt.get("request_id", "")) if valid and receipt else "",
+        "decision_type": str(receipt.get("decision_type", "")) if valid and receipt else "",
+        "receipt": receipt if valid else {},
+    }
+    if payload.request_id:
+        body["request_id_matches"] = bool(
+            valid and receipt and str(receipt.get("request_id", "")) == payload.request_id[:120]
+        )
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/receipt/{req_id}", response_class=HTMLResponse)

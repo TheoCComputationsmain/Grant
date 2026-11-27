@@ -1,0 +1,291 @@
+openapi: 3.1.0
+info:
+  title: Grant Consent Tools
+  version: 0.1.0
+  description: >-
+    Zero-custody human approval checkpoints for Dify agents. Import this file
+    into Dify as a custom OpenAPI tool, or paste the public URL
+    https://grant-consent.vercel.app/openapi.json. Grant never receives
+    credentials, payment details, raw scope values, or raw PII.
+  x-dify:
+    identity:
+      author: Grant
+      name: grant_consent
+      label:
+        en_US: Grant Consent
+        zh_Hans: Grant 授权
+      description:
+        en_US: Ask a human once before an agent sends, spends, refunds, or publishes.
+        zh_Hans: 在代理发送、付款、退款或发布前，先征求人类一次同意。
+      tags:
+        - security
+        - human-in-the-loop
+        - approvals
+        - guardrails
+        - payments
+    credentials:
+      type: api-key
+      description: >-
+        Optional. Leave empty for the 20-call/hour demo tier. For production,
+        paste a gr_live_ key; Dify sends it as Authorization: Bearer <key>.
+      api-key:
+        header: Authorization
+        value: Bearer {{api_key}}
+servers:
+  - url: https://grant-consent.vercel.app
+    description: Live Grant production deployment (derived from .vercel/project.json).
+security:
+  - {}
+paths:
+  /v1/approvals:
+    post:
+      tags:
+        - Grant
+      operationId: createApproval
+      summary: Create one scoped human approval checkpoint.
+      description: >-
+        Returns a private approval URL. Scope must contain only redacted
+        metadata — no credentials, payment details, or raw PII.
+      security:
+        - GrantLiveKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GateRequest'
+            examples:
+              email_outreach:
+                summary: Ask before sending an email
+                value:
+                  agent_name: support-agent
+                  tool_name: send_email
+                  summary: Send one follow-up email to a customer
+                  scope:
+                    channel: email
+                    recipient_count: 1
+                  workspace: support
+              refund:
+                summary: Ask before refunding an order
+                value:
+                  agent_name: refund-agent
+                  tool_name: issue_refund
+                  summary: Refund order ORD-4821 for 48 USD
+                  scope:
+                    order_ref: ORD-4821
+                    amount: 48
+                    currency: USD
+                  workspace: store
+      responses:
+        '201':
+          description: A standing rule approved the action immediately.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResponse'
+        '202':
+          description: Checkpoint created; a human must approve.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResponse'
+        '402':
+          description: A paid plan is required for this feature.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantError'
+        '429':
+          description: Demo limit reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantError'
+  /v1/approvals/{request_id}:
+    get:
+      tags:
+        - Grant
+      operationId: getApproval
+      summary: Poll one approval and read its signed receipt.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: The request_id returned by createApproval.
+          schema:
+            type: string
+            maxLength: 120
+      responses:
+        '200':
+          description: Current status, decision, and receipt metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalStatus'
+        '404':
+          description: Request not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantError'
+  /v1/receipts/verify:
+    post:
+      tags:
+        - Grant
+      operationId: verifyReceipt
+      summary: Verify a signed Grant receipt.
+      description: Check this before executing any protected downstream action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiptVerifyRequest'
+      responses:
+        '200':
+          description: Verification result. No scope values are returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptVerifyResponse'
+components:
+  securitySchemes:
+    GrantLiveKey:
+      type: http
+      scheme: bearer
+      bearerFormat: gr_live_
+      description: Optional Grant API key. Without it, 20 calls/hour are allowed.
+  schemas:
+    GateRequest:
+      type: object
+      properties:
+        agent_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: The agent asking permission.
+        tool_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: The tool or action requiring approval.
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: One plain sentence a human can decide on.
+        scope:
+          type: object
+          default: {}
+          description: Redacted metadata only; Grant hashes it and never shows raw values.
+        workspace:
+          type: string
+          maxLength: 60
+          default: public
+        expires_in_seconds:
+          type: integer
+          minimum: 60
+          maximum: 604800
+      required:
+        - agent_name
+        - tool_name
+        - summary
+    ApprovalResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        request_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved]
+        approval_url:
+          type: string
+          format: uri
+        receipt_url:
+          type: string
+        signed_receipt:
+          type: string
+        decision_type:
+          type: string
+        expires_at:
+          type: string
+      required:
+        - id
+        - request_id
+        - status
+        - approval_url
+    ApprovalStatus:
+      type: object
+      properties:
+        request_id:
+          type: string
+        status:
+          type: string
+        decision:
+          type: string
+        decision_type:
+          type: string
+        scope_hash:
+          type: string
+        approval_url:
+          type: string
+        receipt_url:
+          type: string
+        signed_receipt:
+          type: string
+        receipt_verified:
+          type: boolean
+        receipt:
+          type: object
+      required:
+        - request_id
+        - status
+    ReceiptVerifyRequest:
+      type: object
+      properties:
+        signed_receipt:
+          type: string
+          minLength: 1
+          maxLength: 8000
+        request_id:
+          type: string
+          maxLength: 120
+      required:
+        - signed_receipt
+    ReceiptVerifyResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        status:
+          type: string
+        request_id:
+          type: string
+        decision_type:
+          type: string
+        request_id_matches:
+          type: boolean
+        receipt:
+          type: object
+      required:
+        - valid
+    GrantError:
+      type: object
+      properties:
+        detail:
+          type: object
+          properties:
+            error:
+              type: string
+            required_tier:
+              type: string
+            code:
+              type: string
+x-grant:
+  privacy: Grant never sees your credentials or payment details. It only records what you allowed.
+  watermark: "● Protected by Grant · Zero-custody consent infrastructure"
+  cta: Get Your Free API Key →
+  public_openapi: https://grant-consent.vercel.app/openapi.json

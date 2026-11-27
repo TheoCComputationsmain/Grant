@@ -1,0 +1,19 @@
+name = "grant-ai-gateway"
+main = "worker.ts"
+compatibility_date = "2026-01-01"
+
+# No dependencies, no nodejs_compat needed, no secrets in this file.
+[vars]
+GRANT_BASE_URL = "https://grant-consent.vercel.app"
+PROTECTED_TOOLS = "send_email,send_message,issue_refund,create_charge,transfer_funds,publish_content,write_record,delete_record,execute_payment"
+GRANT_MODE = "checkpoint"
+POLL_INTERVAL_MS = "1000"
+POLL_TIMEOUT_MS = "60000"
+
+# Required before deploy. Add with:
+#   npx wrangler secret put UPSTREAM_URL
+#   npx wrangler secret put GRANT_API_KEY   (optional; demo tier allows 20 calls/hour)
+# UPSTREAM_URL is the HTTPS tool/AI endpoint being protected.
+
+[observability]
+enabled = false
