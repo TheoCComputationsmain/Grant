@@ -1,0 +1,62 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": [
+    "TheoCComputationsmain"
+  ],
+  "name": "grant",
+  "displayName": "Grant · Human-in-the-loop approvals",
+  "description": "Zero-custody consent infrastructure for AI agents. Grant pauses proposed tool calls, asks one human, and returns a signed receipt with no credentials, payment details, or raw scope values.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TheoCComputationsmain/Grant"
+  },
+  "homepage": "https://grant-approve.vercel.app",
+  "documentation": "https://grant-approve.vercel.app/docs",
+  "privacyPolicy": "https://grant-approve.vercel.app/privacy",
+  "tags": [
+    "security",
+    "human-in-the-loop",
+    "approvals",
+    "guardrails",
+    "payments",
+    "zero-custody"
+  ],
+  "remotes": [
+    {
+      "transport": "streamable-http",
+      "url": "https://grant-approve.vercel.app/api/mcp",
+      "protocolVersion": "2025-06-18",
+      "authentication": "optional Bearer gr_live_... key; 20 calls/hour in demo mode"
+    }
+  ],
+  "tools": [
+    {
+      "name": "request_human_approval",
+      "description": "Create one scoped human checkpoint and receive a private approval URL.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_name": { "type": "string" },
+          "tool_name": { "type": "string" },
+          "summary": { "type": "string" },
+          "scope": { "type": "object" },
+          "workspace": { "type": "string" }
+        },
+        "required": ["agent_name", "tool_name", "summary"]
+      }
+    },
+    {
+      "name": "check_approval_status",
+      "description": "Read the status and signed receipt of one approval request.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" }
+        },
+        "required": ["request_id"]
+      }
+    }
+  ]
+}

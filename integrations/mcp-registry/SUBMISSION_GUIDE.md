@@ -1,12 +1,22 @@
-# Grant · Smithery + Glama submission guide
+# Grant · MCP registry submission guide
 
-Both listings point at the same hosted Streamable HTTP MCP endpoint. No installation step, no Dockerfile, and no local process.
+All listings point at the same hosted Streamable HTTP MCP endpoint. No installation step, no Dockerfile, and no local process.
+
+## Official MCP Registry — published
+
+Grant is already published and active at `io.github.TheoCComputationsmain/grant-consent`:
+
+```text
+https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.TheoCComputationsmain%2Fgrant-consent
+```
+
+`server.json` at the repository root declares the remote endpoint, and `.github/workflows/publish-mcp.yml` republishes it on `v*` tags using GitHub OIDC. To update the listing, edit `server.json`, bump the version, and push a new tag.
 
 **Remote MCP URL:** `https://grant-approve.vercel.app/api/mcp`
 **Public contract:** `https://grant-approve.vercel.app/openapi.json`
 **Privacy policy:** `https://grant-approve.vercel.app/privacy`
 
-The canonical domain is the verified production alias of the `grant-consent` Vercel project. If the live alias changes, update `https://grant-approve.vercel.app` in `smithery.yaml`, `glama.json`, and this guide.
+The canonical domain is the verified production alias of the `grant-consent` Vercel project. If the live alias changes, update `https://grant-approve.vercel.app` in `server.json`, `glama.json`, `smithery.yaml` (historical only), and this guide.
 
 ## Shared copy (paste exactly)
 
@@ -47,25 +57,9 @@ security, human-in-the-loop, approvals, guardrails, payments
 
 Legacy aliases `grant.request_approval` and `grant.get_request` are also available.
 
-## Smithery.ai
+## Smithery.ai — retired
 
-1. Open **https://smithery.ai/new**.
-2. Choose **URL** publishing and paste:
-
-   ```
-   https://grant-approve.vercel.app/api/mcp
-   ```
-
-3. Fill the listing fields from the shared copy above. Use namespace `@grant` and server name `consent`, giving the qualified name `@grant/consent`.
-4. Leave configuration fields empty (the endpoint accepts an optional `Authorization: Bearer gr_live_...` header and works without one in demo mode).
-5. Attach `smithery.yaml` in the repository as the submission record and confirm the scanner sees both tools; the live server advertises them at `tools/list`.
-6. Publish, then verify the server page links to `https://grant-approve.vercel.app/docs` and `https://grant-approve.vercel.app/privacy`.
-
-CLI equivalent (after `npm i -g @smithery/cli` and `smithery login`):
-
-```bash
-smithery mcp publish "https://grant-approve.vercel.app/api/mcp" -n @grant/consent
-```
+Smithery shut down its MCP proxy, managed identity, accounts, API keys, API, Connect, Toolbox, CLI, and SDKs on **October 31, 2026**. `https://smithery.ai/new` now returns a not-found page and the remaining site is a read-only directory powered by Arcade. `smithery.yaml` is kept only as a historical submission record; do not attempt the old CLI command. Use the official MCP Registry above instead.
 
 ## Glama.ai
 
@@ -84,6 +78,6 @@ smithery mcp publish "https://grant-approve.vercel.app/api/mcp" -n @grant/consen
 
 4. Paste the shared title, tagline, description, and tags. Set maintainer to the GitHub username in `glama.json` (`TheoCComputationsmain`); change both if the listing is claimed from a different account.
 5. Add `glama.json` to the **repository root** when the upstream PR lands (Glama reads it from the root to verify ownership). Until then, paste its values into the submission form.
-6. Submit and confirm the listing shows a remote HTTP server, not a local stdio command.
+6. Submit and confirm the listing shows a remote HTTP server, not a local stdio command. Glama requires a signed-in account; the browser flow redirects to GitHub OAuth before **Add Server** can be used. `glama.json` is also copied to the repository root for ownership verification.
 
 No outreach, votes, or traffic generation is part of this checklist.

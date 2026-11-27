@@ -41,7 +41,7 @@ Adapters send only: agent name, tool name, a short human-readable summary, and r
 
 | Path | Destination |
 | --- | --- |
-| `mcp-registry/` | Smithery.ai + Glama.ai remote MCP listings |
+| `mcp-registry/` | Official MCP Registry (published) + Glama.ai remote MCP listing |
 | `chatgpt-gpt-store/` | Two public Custom GPT blueprints with Grant Actions |
 | `workflows/` | n8n workflow + Dify tool schema |
 | `litellm/` | PR package for `BerriAI/litellm` |
