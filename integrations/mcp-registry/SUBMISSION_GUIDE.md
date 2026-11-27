@@ -82,7 +82,7 @@ smithery mcp publish "https://grant-approve.vercel.app/api/mcp" -n @grant/consen
    https://github.com/TheoCComputationsmain/Grant
    ```
 
-4. Paste the shared title, tagline, description, and tags. Set maintainer to the GitHub username in `glama.json` (`theoccomputations`); change both if the listing is claimed from a different account.
+4. Paste the shared title, tagline, description, and tags. Set maintainer to the GitHub username in `glama.json` (`TheoCComputationsmain`); change both if the listing is claimed from a different account.
 5. Add `glama.json` to the **repository root** when the upstream PR lands (Glama reads it from the root to verify ownership). Until then, paste its values into the submission form.
 6. Submit and confirm the listing shows a remote HTTP server, not a local stdio command.
 

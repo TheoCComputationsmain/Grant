@@ -1,7 +1,7 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": [
-    "theoccomputations"
+    "TheoCComputationsmain"
   ],
   "name": "grant",
   "displayName": "Grant · Human-in-the-loop approvals",
