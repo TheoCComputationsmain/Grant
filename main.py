@@ -3313,6 +3313,15 @@ def workspace_page(
 DOCS_TEMPLATE = """
 <section class="hero glass"><span class="eyebrow"><span class="dot"></span> Documentation</span><h1>One request.<br><em>One decision.</em></h1>
 <p class="lede">Grant is a consent layer. Your agent asks, a human taps a link, and your agent receives a signed permission. It appears inside the agent’s normal message — not as a separate app people must remember.</p></section>
+<section class="section glass"><h2>ChatGPT, Claude &amp; Cursor Remote MCP Setup</h2>
+<p class="sub">No Custom GPT Builder account or paid plan is needed to paste Grant's Remote MCP URL into an MCP-capable client. Custom MCP availability depends on the client, plan, and workspace admin settings; if a client does not offer it, use Claude, Cursor, or a free bot store instead.</p>
+<div class="grid">
+<div class="tile"><h3>1. Copy the endpoint</h3><p>Copy <span class="mono">__GRANT_BASE__/api/mcp</span>.</p></div>
+<div class="tile"><h3>2. Add a remote MCP connector</h3><p>In ChatGPT, open <b>Plugins → Add custom MCP server</b> where custom MCP servers are available on your plan, choose no authentication for the demo, paste the URL, acknowledge the risk, and create/install it. In Claude or Cursor, paste the same URL into their Remote MCP / MCP Servers add-server field.</p></div>
+<div class="tile"><h3>3. Ask for a gate</h3><p>Ask your assistant to create a Grant approval before it sends, spends, refunds, or publishes. Approve in the browser, then let it verify the signed receipt and continue.</p></div>
+</div>
+<p class="sub">Grant never sees your credentials or payment details. It only records what you allowed. <a href="/api/mcp">MCP setup details</a> · <a href="/privacy">Privacy</a></p>
+</section>
 <section class="section glass"><h2>Install</h2>
 <pre><code>pip install grant-consent
 grantctl doctor --url __GRANT_BASE__</code></pre>
@@ -3855,6 +3864,18 @@ def mcp_setup_page() -> str:
   <p class="sub">Point any MCP client at <code>{html.escape(base, quote=True)}/api/mcp</code>. Send JSON-RPC over POST with a <code>gr_live_</code> Bearer key, or use the 20-per-hour demo mode without a key.</p>
   <pre><code>{html.escape(snippet, quote=True)}</code></pre>
   <p class="sub">Methods: <code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>. The machine-readable contract lives at <a href="/openapi.json">/openapi.json</a>.</p>
+</section>
+<section class="section glass">
+  <span class="eyebrow"><span class="dot"></span> Browser connector</span>
+  <h2>ChatGPT, Claude &amp; Cursor Remote MCP Setup</h2>
+  <ol>
+    <li><b>Copy</b> <code>{html.escape(base, quote=True)}/api/mcp</code>.</li>
+    <li><b>Add it as a Remote MCP Connector:</b> in ChatGPT where custom MCP servers are available on your plan, open <b>Plugins → Add custom MCP server</b>, choose no authentication for the demo, paste the URL, acknowledge the risk, and create/install. In Claude or Cursor, paste it into the Remote MCP / MCP Servers add-server field.</li>
+    <li><b>Ask for a gate:</b> request an approval before any send, spend, refund, or publish. Approve in the browser, then let the client verify the signed receipt before it continues.</li>
+  </ol>
+  <p class="sub">No Custom GPT Builder account is required. Availability varies by client plan and workspace settings; use Claude, Cursor, or a <a href="https://github.com/TheoCComputationsmain/Grant/tree/main/integrations/free-bot-stores">free bot store blueprint</a> if custom MCP servers are not offered. Grant never sees your credentials or payment details. It only records what you allowed.</p>
+  <div class="cta"><a class="btn" href="/start">Get Your Free API Key →</a><a class="btn ghost" href="/privacy">Privacy</a></div>
+  <p class="watermark">● Protected by Grant · Zero-custody consent infrastructure</p>
 </section>
 """
     return page("Grant MCP setup", body, "Connect an MCP client directly to Grant.", private=True)

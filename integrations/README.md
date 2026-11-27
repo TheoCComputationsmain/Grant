@@ -43,6 +43,7 @@ Adapters send only: agent name, tool name, a short human-readable summary, and r
 | --- | --- |
 | `mcp-registry/` | Official MCP Registry (published) + Glama.ai remote MCP listing |
 | `chatgpt-gpt-store/` | Two public Custom GPT blueprints with Grant Actions |
+| `free-bot-stores/` | Free HuggingFace Chat Assistants + Coze/Dify Cloud bot-store blueprints (no GPT Builder account) |
 | `workflows/` | n8n workflow + Dify tool schema |
 | `litellm/` | PR package for `BerriAI/litellm` |
 | `portkey/` | PR package for `Portkey-AI/gateway` |
